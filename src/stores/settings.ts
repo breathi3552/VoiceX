@@ -18,7 +18,7 @@ export interface AppSettings {
     uiLanguage: UiLanguage
 
     // ASR
-    asrProviderType: 'volcengine' | 'google' | 'funasr' | 'qwen' | 'gemini' | 'gemini-live' | 'cohere' | 'openai' | 'elevenlabs' | 'soniox' | 'stepaudio' | 'coli'
+    asrProviderType: 'volcengine' | 'google' | 'funasr' | 'qwen' | 'gemini' | 'gemini-live' | 'cohere' | 'openai' | 'elevenlabs' | 'soniox' | 'stepaudio' | 'mimo' | 'coli'
     asrAppKey: string
     asrAccessKey: string
     asrResourceId: string
@@ -91,6 +91,12 @@ export interface AppSettings {
     stepaudioModel: string
     stepaudioBaseUrl: string
     stepaudioLanguage: 'auto' | 'zh' | 'en' | ''
+
+    // ASR Provider: Xiaomi MiMo
+    mimoApiKey: string
+    mimoModel: string
+    mimoBaseUrl: string
+    mimoLanguage: 'auto' | 'zh' | 'en' | ''
 
     // LLM
     enableLlmCorrection: boolean
@@ -264,6 +270,10 @@ const defaultSettings: AppSettings = {
     stepaudioModel: 'stepaudio-2.5-asr',
     stepaudioBaseUrl: 'https://api.stepfun.com/v1',
     stepaudioLanguage: 'auto',
+    mimoApiKey: '',
+    mimoModel: 'mimo-v2.5-asr',
+    mimoBaseUrl: 'https://api.xiaomimimo.com/v1',
+    mimoLanguage: 'auto',
 
     enableLlmCorrection: false,
     llmProviderType: 'volcengine',

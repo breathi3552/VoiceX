@@ -24,7 +24,7 @@ pub struct AppSettings {
     pub ui_language: String, // "system" | "zh-CN" | "en-US"
 
     // ASR settings
-    pub asr_provider_type: String, // "volcengine" | "google" | "funasr" | "qwen" | "gemini" | "gemini-live" | "cohere" | "openai" | "elevenlabs" | "soniox" | "stepaudio" | "coli"
+    pub asr_provider_type: String, // "volcengine" | "google" | "funasr" | "qwen" | "gemini" | "gemini-live" | "cohere" | "openai" | "elevenlabs" | "soniox" | "stepaudio" | "mimo" | "coli"
     pub asr_app_key: String,
     pub asr_access_key: String,
     pub asr_resource_id: String,
@@ -98,6 +98,12 @@ pub struct AppSettings {
     pub stepaudio_model: String,
     pub stepaudio_base_url: String,
     pub stepaudio_language: String,
+
+    // ASR Provider: Xiaomi MiMo
+    pub mimo_api_key: String,
+    pub mimo_model: String,
+    pub mimo_base_url: String,
+    pub mimo_language: String,
 
     // Local ASR Provider: `coli`
     pub coli_command_path: String,
@@ -284,6 +290,10 @@ impl Default for AppSettings {
             stepaudio_model: "stepaudio-2.5-asr".to_string(),
             stepaudio_base_url: "https://api.stepfun.com/v1".to_string(),
             stepaudio_language: "auto".to_string(),
+            mimo_api_key: String::new(),
+            mimo_model: "mimo-v2.5-asr".to_string(),
+            mimo_base_url: "https://api.xiaomimimo.com/v1".to_string(),
+            mimo_language: "auto".to_string(),
             coli_command_path: String::new(),
             coli_use_vad: true,
             coli_asr_interval_ms: 1000,
@@ -370,6 +380,7 @@ fn probe_provider_name(provider: &crate::asr::AsrProviderType) -> &'static str {
         crate::asr::AsrProviderType::ElevenLabs => "ElevenLabs Speech to Text",
         crate::asr::AsrProviderType::Soniox => "Soniox Real-Time STT",
         crate::asr::AsrProviderType::StepAudio => "StepAudio 2.5 ASR",
+        crate::asr::AsrProviderType::Mimo => "Xiaomi MiMo ASR",
         crate::asr::AsrProviderType::Coli => "Local Offline ASR (coli)",
     }
 }
