@@ -1,10 +1,16 @@
 //! Clipboard-based text injection
 
 use arboard::{Clipboard, ImageData};
+#[cfg(target_os = "macos")]
+use core_graphics::event::{CGEvent, CGEventFlags, CGEventTapLocation, EventField};
+#[cfg(target_os = "macos")]
+use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
+#[cfg(target_os = "windows")]
+use enigo::Direction;
 #[cfg(target_os = "windows")]
 use enigo::Key as EnigoKey;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
-use enigo::{Direction, Enigo, Keyboard, Settings};
+use enigo::{Enigo, Keyboard, Settings};
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
 use rdev::{simulate, EventType, Key};
 use std::borrow::Cow;
@@ -156,6 +162,7 @@ pub struct TextInjector {
     mode: TextInjectionMode,
     pre_paste_delay_ms: u64,
     restore_delay_ms: u64,
+    skip_clipboard_restore: bool,
 }
 
 impl TextInjector {
@@ -164,14 +171,24 @@ impl TextInjector {
             mode: TextInjectionMode::Pasteboard,
             pre_paste_delay_ms: CLIPBOARD_PRE_PASTE_DELAY_MS,
             restore_delay_ms: CLIPBOARD_RESTORE_DELAY_MS,
+            skip_clipboard_restore: false,
         }
     }
 
-    pub fn with_mode(mode: TextInjectionMode) -> Self {
+    /// `skip_clipboard_restore` should be set for targets known to bridge the
+    /// clipboard over a variable-latency channel (for example a per-app
+    /// text-injection override configured for a remote-desktop client). A
+    /// fixed restore delay races that bridge: if the delay fires before the
+    /// remote side has actually read the fresh clipboard content, we hand it
+    /// back whatever was there before instead, and the remote host pastes
+    /// that stale value. Restoring the clipboard is not safe to do
+    /// automatically for these targets, so we skip it entirely.
+    pub fn with_mode(mode: TextInjectionMode, skip_clipboard_restore: bool) -> Self {
         Self {
             mode,
             pre_paste_delay_ms: CLIPBOARD_PRE_PASTE_DELAY_MS,
             restore_delay_ms: CLIPBOARD_RESTORE_DELAY_MS,
+            skip_clipboard_restore,
         }
     }
 
@@ -218,7 +235,13 @@ impl TextInjector {
 
         // 4. Wait and restore clipboard
         thread::sleep(Duration::from_millis(self.restore_delay_ms));
-        self.restore_clipboard_if_unchanged(&mut clipboard, backup, text);
+        if self.skip_clipboard_restore {
+            log::debug!(
+                "Skipping clipboard restore for this target (configured as a variable-latency clipboard bridge)"
+            );
+        } else {
+            self.restore_clipboard_if_unchanged(&mut clipboard, backup, text);
+        }
 
         log::debug!("Injected {} characters via pasteboard", text.len());
         Ok(())
@@ -352,22 +375,7 @@ impl TextInjector {
     fn send_paste_command(&self) -> Result<(), InjectorError> {
         #[cfg(target_os = "macos")]
         {
-            // Use Enigo here instead of raw rdev events so modifier flags are kept
-            // in sync with the generated key events. Otherwise macOS can occasionally
-            // treat the trailing V as a literal character instead of Command+V.
-            let mut enigo = Enigo::new(&Settings::default()).map_err(|e| {
-                InjectorError::PasteCommandFailed(format!("Failed to create Enigo: {e}"))
-            })?;
-            enigo
-                .raw(MACOS_COMMAND_KEYCODE, Direction::Press)
-                .map_err(|e| InjectorError::PasteCommandFailed(format!("{e}")))?;
-            enigo
-                .raw(MACOS_V_KEYCODE, Direction::Click)
-                .map_err(|e| InjectorError::PasteCommandFailed(format!("{e}")))?;
-            enigo
-                .raw(MACOS_COMMAND_KEYCODE, Direction::Release)
-                .map_err(|e| InjectorError::PasteCommandFailed(format!("{e}")))?;
-            return Ok(());
+            return self.send_paste_command_macos();
         }
 
         #[cfg(target_os = "windows")]
@@ -403,6 +411,59 @@ impl TextInjector {
 
             Ok(())
         }
+    }
+
+    /// Posts a synthetic Command+V as a raw CGEvent sourced from
+    /// `HIDSystemState` rather than going through Enigo.
+    ///
+    /// Remote-desktop clients (confirmed against Microsoft's "Windows App")
+    /// only bridge the Mac clipboard to the remote session for Command+V
+    /// events sourced from `HIDSystemState` — the state real hardware key
+    /// events share. Enigo only ever creates event sources with `Private` or
+    /// `CombinedSessionState` (see its `Settings::independent_of_keyboard_state`),
+    /// so a paste built on Enigo triggers the remote paste action but never
+    /// the clipboard sync, and the remote side ends up pasting whatever was
+    /// already in its clipboard. The flag construction below otherwise
+    /// mirrors Enigo's own macOS backend so the paste behaves identically
+    /// everywhere else.
+    #[cfg(target_os = "macos")]
+    fn send_paste_command_macos(&self) -> Result<(), InjectorError> {
+        const NX_DEVICELCMDKEYMASK: CGEventFlags = CGEventFlags::from_bits_retain(0x0000_0008);
+        let base_flags = {
+            let mut flags = CGEventFlags::CGEventFlagNonCoalesced;
+            flags.set(CGEventFlags::from_bits_retain(0x2000_0000), true);
+            flags
+        };
+        let command_held_flags =
+            base_flags | CGEventFlags::CGEventFlagCommand | NX_DEVICELCMDKEYMASK;
+
+        let source = CGEventSource::new(CGEventSourceStateID::HIDSystemState).map_err(|_| {
+            InjectorError::PasteCommandFailed("CGEventSource::new failed".to_string())
+        })?;
+
+        let post_key =
+            |keycode: u16, keydown: bool, flags: CGEventFlags| -> Result<(), InjectorError> {
+                let event =
+                    CGEvent::new_keyboard_event(source.clone(), keycode, keydown).map_err(|_| {
+                        InjectorError::PasteCommandFailed(
+                            "CGEvent::new_keyboard_event failed".to_string(),
+                        )
+                    })?;
+                event.set_integer_value_field(
+                    EventField::EVENT_SOURCE_USER_DATA,
+                    i64::from(enigo::EVENT_MARKER),
+                );
+                event.set_flags(flags);
+                event.post(CGEventTapLocation::HID);
+                Ok(())
+            };
+
+        post_key(MACOS_COMMAND_KEYCODE, true, command_held_flags)?;
+        post_key(MACOS_V_KEYCODE, true, command_held_flags)?;
+        post_key(MACOS_V_KEYCODE, false, command_held_flags)?;
+        post_key(MACOS_COMMAND_KEYCODE, false, base_flags)?;
+
+        Ok(())
     }
 
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]

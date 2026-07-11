@@ -378,6 +378,11 @@ impl SessionController {
             .as_ref()
             .map(|override_item| crate::injector::TextInjectionMode::from_str(&override_item.mode))
             .unwrap_or(state.text_injection_mode);
+        // Per-app overrides exist specifically for targets with unusual injection
+        // needs (e.g. remote-desktop clients bridging the clipboard over a
+        // variable-latency channel), so skip the timed clipboard restore for them —
+        // see TextInjector::with_mode's doc comment for why a fixed delay isn't safe.
+        let skip_clipboard_restore_for_override = matched_override.is_some();
         let duration_ms = state.session_duration_ms;
         let audio_path = state
             .session_audio_path
@@ -502,7 +507,7 @@ impl SessionController {
                 corrected_by_llm,
                 was_processed
             );
-            log::debug!("Injection preview: {}", preview(&final_text));
+            log::info!("Injection preview: \"{}\"", preview(&final_text));
             // Guard again before emitting/injecting.
             if cancel_flag.load(std::sync::atomic::Ordering::SeqCst) {
                 log::info!("Injection skipped: cancelled before emit");
@@ -511,7 +516,12 @@ impl SessionController {
             controller.emit_transcript(&final_text, true);
             let inject_handle =
                 crate::services::text_injection_service::TextInjectionService::new()
-                    .inject_background_guarded(mode, final_text.clone(), cancel_flag.clone());
+                    .inject_background_guarded(
+                        mode,
+                        final_text.clone(),
+                        cancel_flag.clone(),
+                        skip_clipboard_restore_for_override,
+                    );
             // Wait for the blocking injection to complete before signalling InjectDone.
             // This prevents a new injection from starting while the previous one is
             // still writing to the clipboard or typing characters.
