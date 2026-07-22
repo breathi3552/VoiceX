@@ -43,6 +43,14 @@ pub fn build_llm_config_from_settings(settings: &AppSettings) -> LLMConfig {
             api_mode: LLMApiMode::ChatCompletions,
             volcengine_reasoning_effort: None,
         },
+        LLMProviderType::Gemini => LLMConfig {
+            provider_type: LLMProviderType::Gemini,
+            base_url: settings.llm_gemini_base_url.clone(),
+            api_key: settings.llm_gemini_api_key.clone(),
+            model_name: settings.llm_gemini_model.clone(),
+            api_mode: LLMApiMode::ChatCompletions,
+            volcengine_reasoning_effort: None,
+        },
         LLMProviderType::Custom => {
             let endpoint = crate::commands::settings::active_custom_endpoint(settings);
             LLMConfig {

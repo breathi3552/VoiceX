@@ -59,6 +59,10 @@ impl LLMClient {
         let system_prompt = build_system_prompt(prompt_template, dictionary_text, history, options);
         let user_message = format!("原文：\n{}", text);
 
+        if self.config.provider_type == super::config::LLMProviderType::Gemini {
+            return self.correct_with_gemini(&system_prompt, &user_message).await;
+        }
+
         match self.config.api_mode {
             LLMApiMode::ChatCompletions => {
                 self.correct_with_chat_completions(&system_prompt, &user_message)
@@ -122,6 +126,36 @@ impl LLMClient {
         extract_responses_output(parsed.output.as_deref()).ok_or(LLMError::EmptyResponse)
     }
 
+    async fn correct_with_gemini(
+        &self,
+        system_prompt: &str,
+        user_message: &str,
+    ) -> Result<String, LLMError> {
+        let base_url = self.config.base_url.trim_end_matches('/');
+        let url = if base_url.ends_with("/v1beta") || base_url.ends_with("/v1") || base_url.ends_with("/v1alpha") {
+            format!("{}/models/{}:generateContent", base_url, self.config.model_name)
+        } else {
+            format!("{}/v1beta/models/{}:generateContent", base_url, self.config.model_name)
+        };
+
+        let messages = vec![
+            Message {
+                role: "system".to_string(),
+                content: system_prompt.to_string(),
+            },
+            Message {
+                role: "user".to_string(),
+                content: user_message.to_string(),
+            },
+        ];
+
+        let payload = self.provider.build_chat_request(messages, &self.config);
+        let bytes = self.send_json_request(&url, &payload).await?;
+        let parsed: GeminiResponse =
+            serde_json::from_slice(&bytes).map_err(|e| LLMError::InvalidResponse(e.to_string()))?;
+        extract_gemini_response_text(&parsed).ok_or(LLMError::EmptyResponse)
+    }
+
     async fn send_json_request(&self, url: &str, payload: &Value) -> Result<Vec<u8>, LLMError> {
         let request_body =
             serde_json::to_vec(payload).map_err(|e| LLMError::InvalidRequest(e.to_string()))?;
@@ -147,11 +181,18 @@ impl LLMClient {
         }
 
         let started_at = Instant::now();
-        let response = self
+        let mut req_builder = self
             .http
             .post(url)
-            .header("Content-Type", "application/json")
-            .bearer_auth(&self.config.api_key)
+            .header("Content-Type", "application/json");
+
+        if self.config.provider_type == super::config::LLMProviderType::Gemini {
+            req_builder = req_builder.header("x-goog-api-key", &self.config.api_key);
+        } else {
+            req_builder = req_builder.bearer_auth(&self.config.api_key);
+        }
+
+        let response = req_builder
             .body(request_body)
             .send()
             .await
@@ -242,6 +283,26 @@ struct ResponseMessage {
 }
 
 #[derive(Debug, Deserialize)]
+struct GeminiResponse {
+    candidates: Option<Vec<GeminiCandidate>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GeminiCandidate {
+    content: Option<GeminiContentResponse>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GeminiContentResponse {
+    parts: Option<Vec<GeminiPartResponse>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GeminiPartResponse {
+    text: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
 struct ResponsesResponse {
     output: Option<Vec<ResponsesOutputItem>>,
 }
@@ -268,6 +329,27 @@ fn extract_chat_response_text(parsed: &ChatResponse) -> Option<String> {
         .map(|s| s.trim())
         .filter(|s| !s.is_empty())
         .map(|s| s.to_string());
+
+    log_response_text(&content);
+    content
+}
+
+fn extract_gemini_response_text(parsed: &GeminiResponse) -> Option<String> {
+    let content = parsed
+        .candidates
+        .as_ref()
+        .and_then(|c| c.first())
+        .and_then(|c| c.content.as_ref())
+        .and_then(|c| c.parts.as_ref())
+        .map(|parts| {
+            parts
+                .iter()
+                .filter_map(|p| p.text.as_deref())
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
 
     log_response_text(&content);
     content
@@ -469,6 +551,27 @@ mod tests {
         assert_eq!(
             extract_responses_output_from_value(&event).as_deref(),
             Some("OK")
+        );
+    }
+
+    #[test]
+    fn parses_gemini_response_json() {
+        let json_val = json!({
+            "candidates": [
+                {
+                    "content": {
+                        "parts": [
+                            { "text": "Corrected Gemini text" }
+                        ]
+                    }
+                }
+            ]
+        });
+
+        let parsed: super::GeminiResponse = serde_json::from_value(json_val).unwrap();
+        assert_eq!(
+            super::extract_gemini_response_text(&parsed).as_deref(),
+            Some("Corrected Gemini text")
         );
     }
 }

@@ -139,6 +139,11 @@ pub struct AppSettings {
     pub llm_qwen_api_key: String,
     pub llm_qwen_model: String,
 
+    // LLM Provider: Gemini (Google Generative AI)
+    pub llm_gemini_base_url: String,
+    pub llm_gemini_api_key: String,
+    pub llm_gemini_model: String,
+
     // LLM Provider: Custom (multiple named OpenAI-compatible endpoints)
     pub llm_custom_endpoints: Vec<CustomLlmEndpoint>,
     pub llm_active_custom_endpoint_id: String,
@@ -322,6 +327,10 @@ impl Default for AppSettings {
             llm_qwen_base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1".to_string(),
             llm_qwen_api_key: String::new(),
             llm_qwen_model: "qwen3.5-flash".to_string(),
+
+            llm_gemini_base_url: "https://generativelanguage.googleapis.com".to_string(),
+            llm_gemini_api_key: String::new(),
+            llm_gemini_model: "gemini-3.5-flash-lite".to_string(),
 
             llm_custom_endpoints: Vec::new(),
             llm_active_custom_endpoint_id: String::new(),

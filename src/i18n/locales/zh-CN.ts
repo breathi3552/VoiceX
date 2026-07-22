@@ -243,6 +243,7 @@ const zhCN = {
     providerVolcengine: '火山引擎 (Doubao)',
     providerOpenAI: 'OpenAI',
     providerQwen: '千问 (Qwen)',
+    providerGemini: 'Google Gemini',
     providerCustom: '自定义 (OpenAI 兼容)',
     apiModeChatCompletions: 'Chat Completions',
     apiModeResponses: 'Responses',

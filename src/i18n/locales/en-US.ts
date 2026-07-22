@@ -243,6 +243,7 @@ const enUS = {
     providerVolcengine: 'Volcengine (Doubao)',
     providerOpenAI: 'OpenAI',
     providerQwen: 'Qwen',
+    providerGemini: 'Google Gemini',
     providerCustom: 'Custom (OpenAI-compatible)',
     apiModeChatCompletions: 'Chat Completions',
     apiModeResponses: 'Responses',

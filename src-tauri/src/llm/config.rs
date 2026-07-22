@@ -8,9 +8,10 @@ use serde::{Deserialize, Serialize};
 pub enum LLMProviderType {
     #[default]
     Volcengine, // 火山引擎 (Doubao)
-    Openai, // OpenAI
-    Qwen,   // 阿里云千问
-    Custom, // 自定义 OpenAI 兼容
+    Openai,     // OpenAI
+    Qwen,       // 阿里云千问
+    Gemini,     // Google Gemini
+    Custom,     // 自定义 OpenAI 兼容
 }
 
 impl LLMProviderType {
@@ -18,6 +19,7 @@ impl LLMProviderType {
         match s {
             "openai" => Self::Openai,
             "qwen" => Self::Qwen,
+            "gemini" => Self::Gemini,
             "custom" => Self::Custom,
             _ => Self::Volcengine,
         }
@@ -28,6 +30,7 @@ impl LLMProviderType {
             Self::Volcengine => "Volcengine Doubao",
             Self::Openai => "OpenAI",
             Self::Qwen => "Qwen",
+            Self::Gemini => "Google Gemini",
             Self::Custom => "Custom",
         }
     }

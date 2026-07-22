@@ -33,6 +33,7 @@ const LLM_DISPLAY_NAMES: Record<string, string> = {
   volcengine: 'Volcengine',
   openai: 'OpenAI',
   qwen: 'Qwen',
+  gemini: 'Google Gemini',
   custom: 'Custom'
 }
 

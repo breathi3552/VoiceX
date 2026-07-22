@@ -47,6 +47,7 @@ pub fn create_provider(provider_type: &LLMProviderType) -> Box<dyn LLMProvider> 
         LLMProviderType::Volcengine => Box::new(VolcengineProvider),
         LLMProviderType::Openai => Box::new(OpenAIProvider),
         LLMProviderType::Qwen => Box::new(QwenProvider),
+        LLMProviderType::Gemini => Box::new(GeminiProvider),
         LLMProviderType::Custom => Box::new(CustomProvider),
     }
 }
@@ -160,5 +161,96 @@ impl LLMProvider for CustomProvider {
 
     fn name(&self) -> &'static str {
         "Custom"
+    }
+}
+
+// =============================================================================
+// Gemini Provider (Google Generative AI)
+// =============================================================================
+
+pub struct GeminiProvider;
+
+impl LLMProvider for GeminiProvider {
+    fn build_chat_request(&self, messages: Vec<Message>, _config: &LLMConfig) -> Value {
+        let mut system_instruction: Option<Value> = None;
+        let mut contents: Vec<Value> = Vec::new();
+
+        for msg in messages {
+            if msg.role == "system" {
+                system_instruction = Some(serde_json::json!({
+                    "parts": [{ "text": msg.content }]
+                }));
+            } else {
+                let role = if msg.role == "assistant" { "model" } else { "user" };
+                contents.push(serde_json::json!({
+                    "role": role,
+                    "parts": [{ "text": msg.content }]
+                }));
+            }
+        }
+
+        let mut req = serde_json::json!({
+            "contents": contents,
+            "generation_config": {
+                "temperature": 0.2,
+                "maxOutputTokens": 4096
+            }
+        });
+
+        if let Some(sys) = system_instruction {
+            if let Some(obj) = req.as_object_mut() {
+                obj.insert("system_instruction".to_string(), sys);
+            }
+        }
+
+        req
+    }
+
+    fn name(&self) -> &'static str {
+        "Gemini"
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_gemini_provider_build_chat_request() {
+        let provider = GeminiProvider;
+        let config = LLMConfig {
+            provider_type: LLMProviderType::Gemini,
+            base_url: "https://generativelanguage.googleapis.com".to_string(),
+            api_key: "test_key".to_string(),
+            model_name: "gemini-3.5-flash-lite".to_string(),
+            api_mode: super::super::config::LLMApiMode::ChatCompletions,
+            volcengine_reasoning_effort: None,
+        };
+
+        let messages = vec![
+            Message {
+                role: "system".to_string(),
+                content: "System prompt".to_string(),
+            },
+            Message {
+                role: "user".to_string(),
+                content: "User message".to_string(),
+            },
+        ];
+
+        let req = provider.build_chat_request(messages, &config);
+        assert_eq!(
+            req["system_instruction"]["parts"][0]["text"],
+            "System prompt"
+        );
+        assert_eq!(req["contents"][0]["role"], "user");
+        assert_eq!(req["contents"][0]["parts"][0]["text"], "User message");
+        assert_eq!(provider.name(), "Gemini");
+    }
+
+    #[test]
+    fn test_create_gemini_provider() {
+        let provider = create_provider(&LLMProviderType::Gemini);
+        assert_eq!(provider.name(), "Gemini");
     }
 }

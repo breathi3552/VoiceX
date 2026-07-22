@@ -117,6 +117,20 @@ const llmQwenModel = computed({
   set: (v: string) => settingsStore.updateSetting('llmQwenModel', v)
 })
 
+// Gemini-specific
+const llmGeminiBaseUrl = computed({
+  get: () => settingsStore.settings.llmGeminiBaseUrl,
+  set: (v: string) => settingsStore.updateSetting('llmGeminiBaseUrl', v)
+})
+const llmGeminiApiKey = computed({
+  get: () => settingsStore.settings.llmGeminiApiKey,
+  set: (v: string) => settingsStore.updateSetting('llmGeminiApiKey', v)
+})
+const llmGeminiModel = computed({
+  get: () => settingsStore.settings.llmGeminiModel,
+  set: (v: string) => settingsStore.updateSetting('llmGeminiModel', v)
+})
+
 // Custom-specific: the currently selected named endpoint within llmCustomEndpoints.
 const activeCustomEndpoint = computed<CustomLlmEndpoint | null>(() => {
   const { llmCustomEndpoints, llmActiveCustomEndpointId } = settingsStore.settings
@@ -213,6 +227,7 @@ function deleteActiveCustomEndpoint() {
 const isVolcengine = computed(() => llmProviderType.value === 'volcengine')
 const isOpenai = computed(() => llmProviderType.value === 'openai')
 const isQwen = computed(() => llmProviderType.value === 'qwen')
+const isGemini = computed(() => llmProviderType.value === 'gemini')
 const isCustom = computed(() => llmProviderType.value === 'custom')
 const activePromptTab = ref<'assistant' | 'translation'>('assistant')
 const llmProbeLoading = ref(false)
@@ -383,6 +398,34 @@ async function runLlmProviderProbe() {
               <div class="field-label">{{ t('llm.modelName') }}</div>
             </div>
             <NInput v-model:value="llmQwenModel" class="field-control short" />
+          </div>
+        </template>
+
+        <!-- Gemini Settings -->
+        <template v-if="isGemini">
+          <div class="field-row">
+            <div class="field-text">
+              <div class="field-label">{{ t('llm.baseUrl') }}</div>
+            </div>
+            <NInput v-model:value="llmGeminiBaseUrl" class="field-control" />
+          </div>
+          <div class="field-row">
+            <div class="field-text">
+              <div class="field-label">{{ t('llm.apiKey') }}</div>
+            </div>
+            <NInput
+              v-model:value="llmGeminiApiKey"
+              type="password"
+              show-password-on="click"
+              :placeholder="t('llm.enterApiKey')"
+              class="field-control"
+            />
+          </div>
+          <div class="field-row">
+            <div class="field-text">
+              <div class="field-label">{{ t('llm.modelName') }}</div>
+            </div>
+            <NInput v-model:value="llmGeminiModel" class="field-control short" />
           </div>
         </template>
 

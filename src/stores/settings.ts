@@ -125,6 +125,11 @@ export interface AppSettings {
     llmQwenApiKey: string
     llmQwenModel: string
 
+    // LLM Provider: Gemini (Google Generative AI)
+    llmGeminiBaseUrl: string
+    llmGeminiApiKey: string
+    llmGeminiModel: string
+
     // LLM Provider: Custom (multiple named OpenAI-compatible endpoints)
     llmCustomEndpoints: CustomLlmEndpoint[]
     llmActiveCustomEndpointId: string
@@ -297,6 +302,10 @@ const defaultSettings: AppSettings = {
     llmQwenBaseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
     llmQwenApiKey: '',
     llmQwenModel: 'qwen3.5-flash',
+
+    llmGeminiBaseUrl: 'https://generativelanguage.googleapis.com',
+    llmGeminiApiKey: '',
+    llmGeminiModel: 'gemini-3.5-flash-lite',
 
     llmCustomEndpoints: [],
     llmActiveCustomEndpointId: '',
