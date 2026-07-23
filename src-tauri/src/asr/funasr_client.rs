@@ -29,7 +29,7 @@ impl FunAsrRealtimeClient {
         channels: u16,
         audio_rx: Receiver<Vec<u8>>,
         cancel: tokio_util::sync::CancellationToken,
-        _history: Vec<String>,
+        history: Vec<String>,
         on_event: F,
     ) -> Result<(), AsrError>
     where
@@ -62,8 +62,44 @@ impl FunAsrRealtimeClient {
         })?;
         let (mut ws_write, mut ws_read) = ws_stream.split();
 
+        // 上下文增强：把 VoiceX 用户词典与最近识别历史组装成 input.context。
+        // 仅 fun-asr-realtime 与 fun-asr-realtime-2025-11-07 支持（据阿里云官方文档 2026-07-22）。
+        // 不支持的模型若开了上下文，显式 warn 而非静默吞（遵守 AGENTS.md 防静默失败规则）。
+        let context_payload = build_context_payload(
+            &self.config.funasr_model,
+            &self.config.hotwords,
+            &history,
+            self.config.enable_context,
+        );
+        match &context_payload {
+            Some(ctx) => log::info!(
+                "Fun-ASR realtime: 上下文增强已启用 (model={}, context_chars={})",
+                self.config.funasr_model,
+                context_text_len(ctx),
+            ),
+            None => {
+                if self.config.enable_context || !self.config.hotwords.is_empty() {
+                    if !model_supports_context(&self.config.funasr_model) {
+                        log::warn!(
+                            "Fun-ASR realtime: 上下文增强被忽略——模型 {} 不支持（仅 fun-asr-realtime 与 fun-asr-realtime-2025-11-07 支持）",
+                            self.config.funasr_model
+                        );
+                    } else if context_text_for(&self.config.hotwords, &history, self.config.enable_context).is_empty() {
+                        log::debug!(
+                            "Fun-ASR realtime: 上下文增强已开启但词表与历史均为空，跳过"
+                        );
+                    }
+                }
+            }
+        }
+
         let task_id = uuid::Uuid::new_v4().to_string();
-        let start_message = build_run_task_message(&self.config, &task_id, stream_rate)?;
+        let start_message = build_run_task_message(
+            &self.config,
+            &task_id,
+            stream_rate,
+            context_payload.as_ref(),
+        )?;
         ws_write
             .send(Message::Text(start_message.into()))
             .await
@@ -72,16 +108,6 @@ impl FunAsrRealtimeClient {
                     .in_phase(AsrPhase::Handshake)
             })?;
         wait_for_task_started(&mut ws_read, &task_id).await?;
-
-        if !self.config.hotwords.is_empty() {
-            log::info!(
-                "Fun-ASR realtime: VoiceX dictionary has {} entries, but inline hotwords are not supported by the current integration; ignoring them",
-                self.config.hotwords.len()
-            );
-        }
-        if self.config.enable_context {
-            log::info!("Fun-ASR realtime: ASR history context is not supported; ignoring it");
-        }
 
         let on_event = Arc::new(on_event);
         let reader_cancel = cancel.clone();
@@ -383,6 +409,7 @@ fn build_run_task_message(
     config: &AsrConfig,
     task_id: &str,
     sample_rate: u32,
+    context: Option<&Value>,
 ) -> Result<String, AsrError> {
     let mut parameters = json!({
         "format": "pcm",
@@ -391,6 +418,11 @@ fn build_run_task_message(
 
     if let Some(language_hint) = primary_language_hint(&config.funasr_language) {
         parameters["language_hints"] = json!([language_hint]);
+    }
+
+    let mut input = serde_json::Map::new();
+    if let Some(ctx) = context {
+        input.insert("context".to_string(), ctx.clone());
     }
 
     serde_json::to_string(&json!({
@@ -405,10 +437,129 @@ fn build_run_task_message(
             "function": "recognition",
             "model": config.funasr_model.trim(),
             "parameters": parameters,
-            "input": {}
+            "input": Value::Object(input)
         }
     }))
     .map_err(|e| AsrError::ProtocolError(format!("Failed to serialize Fun-ASR run-task: {}", e)))
+}
+
+/// 据阿里云官方文档（更新于 2026-07-22），Fun-ASR 上下文增强仅适用于：
+/// - 实时：fun-asr-realtime、fun-asr-realtime-2025-11-07
+/// 注意最新快照 fun-asr-realtime-2026-02-28 不支持，开了会被静默忽略。
+fn model_supports_context(model: &str) -> bool {
+    let trimmed = model.trim();
+    matches!(
+        trimmed,
+        "fun-asr-realtime" | "fun-asr-realtime-2025-11-07"
+    )
+}
+
+/// 组装上下文增强的 input.context 载荷。
+///
+/// 返回 None 的两种情况：
+/// 1. 模型不支持上下文增强（调用方应据此 warn 用户）
+/// 2. 词表与历史均为空（无需发 context）
+///
+/// 约束（官方）：
+/// - 引擎最多保留最近 5 轮上下文；VoiceX 词表增强只用 1 轮 user 消息
+/// - 每轮文本总长度不超过 400 字符，超出从末尾截断
+/// - text 必须包含音频里待识别的原词，仅语义描述效果有限
+fn build_context_payload(
+    model: &str,
+    hotwords: &[String],
+    history: &[String],
+    enable_context: bool,
+) -> Option<Value> {
+    if !model_supports_context(model) {
+        return None;
+    }
+
+    let text = context_text_for(hotwords, history, enable_context);
+    if text.is_empty() {
+        return None;
+    }
+
+    // 官方约束：每轮 400 字符，超出从末尾截断
+    const MAX_CHARS: usize = 400;
+    let char_count = text.chars().count();
+    let truncated: String = if char_count > MAX_CHARS {
+        log::debug!(
+            "Fun-ASR context text truncated from {} to {} chars",
+            char_count,
+            MAX_CHARS
+        );
+        text.chars().take(MAX_CHARS).collect()
+    } else {
+        text
+    };
+
+    Some(json!([
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "input_text",
+                    "text": truncated
+                }
+            ]
+        }
+    ]))
+}
+
+/// 构造上下文文本。
+///
+/// 规则：
+/// - 当 enable_context=true：拼接最近 history（最多 3 条）+ 用户词典词表
+/// - 当 enable_context=false：仅用用户词典词表（词表增强场景，不需历史）
+///
+/// 词表部分：用 ", " 分隔，去重，最多取前 64 个（与 qwen_client corpus 思路一致）
+fn context_text_for(hotwords: &[String], history: &[String], enable_context: bool) -> String {
+    let mut parts: Vec<String> = Vec::new();
+
+    // 仅在显式开启 enable_context 时才拼接历史；否则只用词典做词表增强
+    if enable_context {
+        for h in history.iter().rev().take(3) {
+            let h = h.trim();
+            if !h.is_empty() {
+                parts.push(h.to_string());
+            }
+        }
+    }
+
+    // 词表去重并截断
+    let mut seen = std::collections::HashSet::new();
+    let mut hotword_lines: Vec<String> = hotwords
+        .iter()
+        .map(|w| w.trim().to_string())
+        .filter(|w| !w.is_empty())
+        .filter(|w| seen.insert(w.clone()))
+        .take(64)
+        .collect();
+    if !hotword_lines.is_empty() {
+        if parts.is_empty() {
+            hotword_lines.insert(0, "参考词表：".to_string());
+        }
+        parts.push(hotword_lines.join(", "));
+    }
+
+    parts.join("\n")
+}
+
+/// 计算 context 载荷中所有 text 字段的总字符数（用于日志）
+fn context_text_len(context: &Value) -> usize {
+    context
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|msg| msg.get("content"))
+                .filter_map(|content| content.as_array())
+                .flatten()
+                .filter_map(|item| item.get("text"))
+                .filter_map(Value::as_str)
+                .map(|s| s.chars().count())
+                .sum()
+        })
+        .unwrap_or(0)
 }
 
 fn task_failed_error(header: &serde_json::Map<String, Value>) -> AsrError {
@@ -448,7 +599,10 @@ fn target_sample_rate(model: &str) -> u32 {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_run_task_message, primary_language_hint, target_sample_rate};
+    use super::{
+        build_context_payload, build_run_task_message, context_text_for, context_text_len,
+        model_supports_context, primary_language_hint, target_sample_rate,
+    };
     use crate::asr::AsrConfig;
 
     #[test]
@@ -468,10 +622,171 @@ mod tests {
         let mut config = AsrConfig::default();
         config.funasr_model = "fun-asr-realtime".to_string();
         config.funasr_language = "zh, en".to_string();
-        let msg = build_run_task_message(&config, "task-1", 16_000).unwrap();
+        let msg = build_run_task_message(&config, "task-1", 16_000, None).unwrap();
         assert!(msg.contains("\"action\":\"run-task\""));
         assert!(msg.contains("\"model\":\"fun-asr-realtime\""));
         assert!(msg.contains("\"sample_rate\":16000"));
         assert!(msg.contains("\"language_hints\":[\"zh\"]"));
+        // 无 context 时 input 应为空对象
+        assert!(msg.contains("\"input\":{}"));
+    }
+
+    #[test]
+    fn run_task_message_includes_context_when_provided() {
+        let mut config = AsrConfig::default();
+        config.funasr_model = "fun-asr-realtime".to_string();
+        let context = super::build_context_payload(
+            "fun-asr-realtime",
+            &["VoiceX".to_string(), "热词".to_string()],
+            &[],
+            false,
+        )
+        .expect("context payload should be built for supported model");
+        let msg = build_run_task_message(&config, "task-2", 16_000, Some(&context)).unwrap();
+        assert!(msg.contains("\"context\""));
+        assert!(msg.contains("\"input_text\""));
+        assert!(msg.contains("VoiceX"));
+        assert!(msg.contains("热词"));
+    }
+
+    #[test]
+    fn model_supports_context_only_for_two_official_models() {
+        // 据阿里云官方文档 2026-07-22：仅这两个模型支持上下文增强
+        assert!(model_supports_context("fun-asr-realtime"));
+        assert!(model_supports_context("fun-asr-realtime-2025-11-07"));
+        assert!(model_supports_context("  fun-asr-realtime  ")); // 容忍空白
+
+        // 最新快照不支持——这是最容易踩的坑
+        assert!(!model_supports_context("fun-asr-realtime-2026-02-28"));
+        // 8k 系列不支持
+        assert!(!model_supports_context("fun-asr-flash-8k-realtime"));
+        assert!(!model_supports_context("fun-asr-flash-8k-realtime-2026-01-28"));
+        // 非实时模式不支持（同步/异步都不支持上下文增强之外的模型）
+        assert!(!model_supports_context("fun-asr"));
+        assert!(!model_supports_context("fun-asr-flash-2026-06-15"));
+    }
+
+    #[test]
+    fn build_context_payload_returns_none_for_unsupported_model() {
+        // 最新快照不支持上下文增强——必须返回 None，调用方据此 warn 用户
+        let payload = build_context_payload(
+            "fun-asr-realtime-2026-02-28",
+            &["VoiceX".to_string()],
+            &[],
+            false,
+        );
+        assert!(payload.is_none());
+    }
+
+    #[test]
+    fn build_context_payload_returns_none_when_no_hotwords_and_no_history() {
+        let payload =
+            build_context_payload("fun-asr-realtime", &[], &[], false);
+        assert!(payload.is_none());
+    }
+
+    #[test]
+    fn build_context_payload_includes_hotwords_for_supported_model() {
+        let payload = build_context_payload(
+            "fun-asr-realtime",
+            &["VoiceX".to_string(), "Kubernetes".to_string()],
+            &[],
+            false,
+        )
+        .expect("supported model with hotwords should produce payload");
+        let text = payload[0]["content"][0]["text"]
+            .as_str()
+            .expect("text field should exist");
+        assert!(text.contains("VoiceX"));
+        assert!(text.contains("Kubernetes"));
+        assert!(text.contains("参考词表")); // 词表增强前缀
+    }
+
+    #[test]
+    fn build_context_payload_includes_history_when_enable_context() {
+        let payload = build_context_payload(
+            "fun-asr-realtime",
+            &["VoiceX".to_string()],
+            &["上一轮用户说了什么".to_string()],
+            true,
+        )
+        .expect("supported model should produce payload");
+        let text = payload[0]["content"][0]["text"]
+            .as_str()
+            .expect("text field should exist");
+        // enable_context=true 时历史应在词表之前
+        assert!(text.contains("上一轮用户说了什么"));
+        assert!(text.contains("VoiceX"));
+    }
+
+    #[test]
+    fn build_context_payload_omits_history_when_enable_context_false() {
+        // enable_context=false 时只用词表，不掺历史——词表增强场景
+        let payload = build_context_payload(
+            "fun-asr-realtime",
+            &["VoiceX".to_string()],
+            &["不应该出现的上一轮历史".to_string()],
+            false,
+        )
+        .expect("supported model with hotwords should produce payload");
+        let text = payload[0]["content"][0]["text"]
+            .as_str()
+            .expect("text field should exist");
+        assert!(!text.contains("不应该出现的上一轮历史"));
+        assert!(text.contains("VoiceX"));
+    }
+
+    #[test]
+    fn build_context_payload_truncates_to_400_chars() {
+        // 构造超长词表，验证截断到 400 字符
+        let long_word = "a".repeat(500);
+        let hotwords = vec![long_word];
+        let payload = build_context_payload("fun-asr-realtime", &hotwords, &[], false)
+            .expect("supported model should produce payload");
+        let text = payload[0]["content"][0]["text"]
+            .as_str()
+            .expect("text field should exist");
+        // 官方约束：每轮 400 字符
+        assert!(text.chars().count() <= 400);
+    }
+
+    #[test]
+    fn context_text_for_deduplicates_hotwords() {
+        let hotwords = vec![
+            "VoiceX".to_string(),
+            "VoiceX".to_string(),
+            "Qwen".to_string(),
+        ];
+        let text = context_text_for(&hotwords, &[], false);
+        assert!(text.contains("VoiceX"));
+        assert!(text.contains("Qwen"));
+        // 去重后 "VoiceX" 只出现一次
+        assert_eq!(text.matches("VoiceX").count(), 1);
+    }
+
+    #[test]
+    fn context_text_for_limits_to_64_hotwords() {
+        let hotwords: Vec<String> = (0..100).map(|i| format!("word{}", i)).collect();
+        let text = context_text_for(&hotwords, &[], false);
+        // 词表前缀 + 前 64 个词
+        for i in 0..64 {
+            assert!(text.contains(&format!("word{}", i)));
+        }
+        assert!(!text.contains("word64"));
+    }
+
+    #[test]
+    fn context_text_len_counts_all_text_fields() {
+        let payload = build_context_payload(
+            "fun-asr-realtime",
+            &["VoiceX".to_string(), "测试".to_string()],
+            &[],
+            false,
+        )
+        .unwrap();
+        let len = context_text_len(&payload);
+        // "参考词表：VoiceX, 测试" = 4 + 6 + 2 + 2 = 14 字符（参考词表：6 + VoiceX 6 + ", " 2 + 测试 2）
+        assert!(len > 0);
+        assert!(len < 400);
     }
 }
