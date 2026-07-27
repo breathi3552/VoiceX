@@ -4,6 +4,19 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.12.0] - 2026-07-28
+
+### Added
+- **Google Gemini as a built-in LLM provider** — Gemini (default `gemini-3.5-flash-lite`) can now be selected directly in Settings → LLM for ASR correction and translation, with its own API key, model, and base URL settings, plus history metadata and connectivity test support.
+- **Context enhancement for Fun-ASR Realtime** — the user dictionary is now passed to Fun-ASR as recognition context, improving accuracy on domain terms and proper nouns. Only the models that support it (`fun-asr-realtime`, `fun-asr-realtime-2025-11-07`) use it; other models log an explicit warning instead of silently dropping the dictionary.
+
+### Changed
+- The Fun-ASR model dropdown now lists the missing snapshot models (including `fun-asr-flash-8k-2026-01-28`) and tags each option with its context / hotword capability. A warning is shown when a dictionary is configured but the selected model does not support context enhancement.
+- ASR-recognized and injected-text previews are now logged unconditionally at info level to make field diagnosis easier.
+
+### Fixed
+- **Clipboard paste into macOS remote-desktop clients** — Cmd+V is now synthesized as a raw `HIDSystemState` CGEvent, which is the only event source Microsoft "Windows App" bridges the Mac clipboard for; previously the remote session pasted stale content. The timed clipboard restore is also skipped for per-app override targets, so a slow remote clipboard channel can no longer read back the pre-injection clipboard.
+
 ## [0.11.0] - 2026-07-07
 
 ### Added

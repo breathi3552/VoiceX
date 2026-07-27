@@ -41,7 +41,7 @@ Hold threshold and double-tap window are configurable. Press **Escape** at any t
 |---|---|---|
 | Volcengine (Doubao Speech) | Cloud streaming (WebSocket) | Optimized for Chinese; hot-word boosting, ITN, punctuation, DDC |
 | Google Cloud Speech-to-Text V2 | Cloud streaming (gRPC) | Multi-language, phrase boost, configurable endpointing |
-| Fun-ASR Realtime | Cloud streaming (WebSocket) | DashScope; `fun-asr-realtime` / `fun-asr-flash-8k-realtime`; tuned for low-latency live dictation |
+| Fun-ASR Realtime | Cloud streaming (WebSocket) | DashScope; `fun-asr-realtime` / `fun-asr-flash-8k-realtime`; tuned for low-latency live dictation; selected models accept the dictionary as recognition context |
 | Qwen (DashScope ASR) | Cloud streaming / batch file upload | Alibaba Cloud; supports `Realtime`, `Batch`, and `Realtime + Batch Refine`; batch paths currently inherit a 5-minute short-audio API cap |
 | Gemini Audio Transcription | Cloud batch file upload | `gemini-3.1-flash-lite-preview`; starts after recording stops; supports auto / zh / en / zh+en hints |
 | Gemini Live Realtime | Cloud streaming (WebSocket) | `gemini-3.1-flash-live-preview`; realtime input-audio transcription with language hints |
@@ -66,6 +66,7 @@ VoiceX can optionally pass ASR output through an LLM for correction or translati
 | Volcengine (Doubao) | `doubao-seed-2-0-mini-260215` |
 | OpenAI (or compatible) | `gpt-4o-mini` |
 | Qwen (DashScope) | `qwen3.5-flash` |
+| Google Gemini | `gemini-3.5-flash-lite` |
 | Custom | Any OpenAI-compatible endpoint |
 
 > **Note:** Each LLM provider requires an API key from the respective platform. Configure your chosen provider in **Settings → LLM**.

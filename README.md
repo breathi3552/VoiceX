@@ -41,7 +41,7 @@ VoiceX 通过一个可配置的全局热键映射三种不同意图：
 |---|---|---|
 | 火山引擎（豆包语音） | 云端流式 (WebSocket) | 中文优化；支持热词增强、ITN、标点、DDC |
 | Google Cloud Speech-to-Text V2 | 云端流式 (gRPC) | 多语种，Phrase Boost，可配置端点检测 |
-| Fun-ASR Realtime | 云端流式 (WebSocket) | DashScope；`fun-asr-realtime` / `fun-asr-flash-8k-realtime`；适合低延迟实时出字 |
+| Fun-ASR Realtime | 云端流式 (WebSocket) | DashScope；`fun-asr-realtime` / `fun-asr-flash-8k-realtime`；适合低延迟实时出字；部分模型支持以词典作为上下文增强 |
 | 通义千问（DashScope ASR） | 云端流式 / 批量文件识别 | 阿里云；支持 `Realtime`、`Batch` 和 `Realtime + 录后 Batch 精修`；batch 路径当前受 5 分钟短音频接口限制 |
 | Gemini Audio Transcription | 云端批量文件识别 | `gemini-3.1-flash-lite-preview`；录音结束后上传整段音频；支持自动 / 中文 / English / 中英混合提示 |
 | Gemini Live Realtime | 云端流式 (WebSocket) | `gemini-3.1-flash-live-preview`；基于输入音频转写的实时识别，可附带语言提示 |
@@ -66,6 +66,7 @@ VoiceX 可选将 ASR 输出交给 LLM 做纠错或翻译。支持的提供商：
 | 火山引擎（豆包） | `doubao-seed-2-0-mini-260215` |
 | OpenAI（或兼容接口） | `gpt-4o-mini` |
 | 通义千问（DashScope） | `qwen3.5-flash` |
+| Google Gemini | `gemini-3.5-flash-lite` |
 | 自定义 | 任何 OpenAI 兼容端点 |
 
 > **提示：** 每个 LLM 提供商都需要到对应平台申请 API Key，在 **设置 → LLM** 中配置即可。
