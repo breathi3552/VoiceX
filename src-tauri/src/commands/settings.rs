@@ -55,8 +55,14 @@ pub struct AppSettings {
     pub qwen_asr_model: String,
     pub qwen_asr_batch_model: String,
     pub qwen_asr_ws_url: String,
+    pub qwen_asr_workspace_id: String,
     pub qwen_asr_language: String,
     pub qwen_asr_post_recording_refine: bool,
+    pub qwen_asr_vocabulary_id: String,
+    pub qwen_asr_hotword_weight: u32,
+    pub qwen_asr_semantic_punctuation_enabled: bool,
+    pub qwen_asr_max_sentence_silence_ms: u32,
+    pub qwen_asr_heartbeat: bool,
 
     // ASR Provider: Gemini Audio Transcription
     pub gemini_api_key: String,
@@ -264,8 +270,14 @@ impl Default for AppSettings {
             qwen_asr_model: "qwen3-asr-flash-realtime".to_string(),
             qwen_asr_batch_model: "qwen3-asr-flash".to_string(),
             qwen_asr_ws_url: "wss://dashscope.aliyuncs.com/api-ws/v1/realtime".to_string(),
+            qwen_asr_workspace_id: String::new(),
             qwen_asr_language: String::new(),
             qwen_asr_post_recording_refine: false,
+            qwen_asr_vocabulary_id: String::new(),
+            qwen_asr_hotword_weight: 4,
+            qwen_asr_semantic_punctuation_enabled: false,
+            qwen_asr_max_sentence_silence_ms: 1300,
+            qwen_asr_heartbeat: false,
             gemini_api_key: String::new(),
             gemini_model: "gemini-3.1-flash-lite-preview".to_string(),
             gemini_live_model: "gemini-3.1-flash-live-preview".to_string(),
@@ -528,11 +540,7 @@ fn custom_endpoint_name_from_base_url(base_url: &str) -> String {
         .split_once("://")
         .map(|(_, rest)| rest)
         .unwrap_or(trimmed);
-    let host = without_scheme
-        .split(['/', ':'])
-        .next()
-        .unwrap_or("")
-        .trim();
+    let host = without_scheme.split(['/', ':']).next().unwrap_or("").trim();
     if host.is_empty() {
         "Custom".to_string()
     } else {
@@ -550,6 +558,14 @@ fn normalize_qwen_settings(settings: &mut AppSettings) {
     if recognition_mode == "batch" {
         settings.qwen_asr_post_recording_refine = false;
     }
+
+    settings.qwen_asr_hotword_weight = match settings.qwen_asr_hotword_weight {
+        1..=5 | 50 => settings.qwen_asr_hotword_weight,
+        _ => 4,
+    };
+    settings.qwen_asr_max_sentence_silence_ms =
+        settings.qwen_asr_max_sentence_silence_ms.clamp(200, 6000);
+    settings.qwen_asr_workspace_id = settings.qwen_asr_workspace_id.trim().to_string();
 }
 
 fn normalize_text_injection_override_mode(mode: &str) -> String {
@@ -946,7 +962,7 @@ pub async fn clear_soniox_debug_overrides(
 mod tests {
     use super::{
         active_custom_endpoint, apply_llm_provider_selection, migrate_llm_custom_endpoints,
-        normalize_text_injection_overrides, AppSettings,
+        normalize_qwen_settings, normalize_text_injection_overrides, AppSettings,
     };
     use crate::foreground_app::TextInjectionAppOverride;
     use crate::services::llm_service::build_llm_config_from_settings;
@@ -980,6 +996,20 @@ mod tests {
             "com.microsoft.rdc.macos"
         );
         assert_eq!(settings.text_injection_overrides[0].mode, "typing");
+    }
+
+    #[test]
+    fn normalize_qwen_settings_clamps_new_model_parameters() {
+        let mut settings = AppSettings::default();
+        settings.qwen_asr_workspace_id = "  workspace-123  ".to_string();
+        settings.qwen_asr_hotword_weight = 49;
+        settings.qwen_asr_max_sentence_silence_ms = 10_000;
+
+        normalize_qwen_settings(&mut settings);
+
+        assert_eq!(settings.qwen_asr_workspace_id, "workspace-123");
+        assert_eq!(settings.qwen_asr_hotword_weight, 4);
+        assert_eq!(settings.qwen_asr_max_sentence_silence_ms, 6000);
     }
 
     /// Mirrors the real persisted shape of a legacy single custom endpoint.

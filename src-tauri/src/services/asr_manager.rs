@@ -1,5 +1,6 @@
 use tokio::sync::mpsc::Receiver;
 
+use crate::asr::funasr_client::qwen_uses_inference_protocol;
 use crate::asr::{
     AsrClient, AsrConfig, AsrEvent, AsrFailure, AsrProviderType, ColiAsrClient,
     ElevenLabsRealtimeClient, ElevenLabsRecognitionMode, FunAsrRealtimeClient, GeminiLiveClient,
@@ -179,26 +180,44 @@ impl AsrManager {
                             config.qwen_language.as_str()
                         },
                     );
-                    if !config.hotwords.is_empty() {
+                    if !config.hotwords.is_empty()
+                        && !qwen_uses_inference_protocol(&config.qwen_model)
+                    {
                         log::info!(
                             "Qwen ASR: sending {} hotwords via corpus.text context biasing",
                             config.hotwords.len()
                         );
                     }
-                    let client = QwenRealtimeClient::new(config);
                     let on_event = on_event.clone();
-                    client
-                        .stream_session(
-                            sample_rate,
-                            channels,
-                            rx,
-                            cancel.clone(),
-                            history,
-                            move |evt| {
-                                (on_event)(evt);
-                            },
-                        )
-                        .await
+                    if qwen_uses_inference_protocol(&config.qwen_model) {
+                        let client = FunAsrRealtimeClient::new_qwen(config);
+                        client
+                            .stream_session(
+                                sample_rate,
+                                channels,
+                                rx,
+                                cancel.clone(),
+                                history,
+                                move |evt| {
+                                    (on_event)(evt);
+                                },
+                            )
+                            .await
+                    } else {
+                        let client = QwenRealtimeClient::new(config);
+                        client
+                            .stream_session(
+                                sample_rate,
+                                channels,
+                                rx,
+                                cancel.clone(),
+                                history,
+                                move |evt| {
+                                    (on_event)(evt);
+                                },
+                            )
+                            .await
+                    }
                 }
             }
             AsrProviderType::Gemini => {

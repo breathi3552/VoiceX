@@ -27,6 +27,7 @@ export interface AppSettings {
     endWindowSize: number | null
     forceToSpeechTime: number | null
     enableDdc: boolean
+    enableAsrContext: boolean
     coliCommandPath: string
     coliUseVad: boolean
     coliAsrIntervalMs: number
@@ -53,8 +54,14 @@ export interface AppSettings {
     qwenAsrModel: string
     qwenAsrBatchModel: string
     qwenAsrWsUrl: string
+    qwenAsrWorkspaceId: string
     qwenAsrLanguage: string
     qwenAsrPostRecordingRefine: boolean
+    qwenAsrVocabularyId: string
+    qwenAsrHotwordWeight: number
+    qwenAsrSemanticPunctuationEnabled: boolean
+    qwenAsrMaxSentenceSilenceMs: number
+    qwenAsrHeartbeat: boolean
     geminiApiKey: string
     geminiModel: string
     geminiLiveModel: string
@@ -221,6 +228,7 @@ const defaultSettings: AppSettings = {
     endWindowSize: 1400,
     forceToSpeechTime: 3500,
     enableDdc: true,
+    enableAsrContext: false,
     coliCommandPath: '',
     coliUseVad: true,
     coliAsrIntervalMs: 1000,
@@ -244,8 +252,14 @@ const defaultSettings: AppSettings = {
     qwenAsrModel: 'qwen3-asr-flash-realtime',
     qwenAsrBatchModel: 'qwen3-asr-flash',
     qwenAsrWsUrl: 'wss://dashscope.aliyuncs.com/api-ws/v1/realtime',
+    qwenAsrWorkspaceId: '',
     qwenAsrLanguage: '',
     qwenAsrPostRecordingRefine: false,
+    qwenAsrVocabularyId: '',
+    qwenAsrHotwordWeight: 4,
+    qwenAsrSemanticPunctuationEnabled: false,
+    qwenAsrMaxSentenceSilenceMs: 1300,
+    qwenAsrHeartbeat: false,
     geminiApiKey: '',
     geminiModel: 'gemini-3.1-flash-lite-preview',
     geminiLiveModel: 'gemini-3.1-flash-live-preview',

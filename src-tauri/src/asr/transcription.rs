@@ -4,6 +4,7 @@ use std::time::Duration;
 
 use tokio_util::sync::CancellationToken;
 
+use crate::asr::funasr_client::qwen_uses_inference_protocol;
 use crate::asr::{
     AsrClient, AsrConfig, AsrEvent, AsrProviderType, CohereTranscriptionClient, ColiAsrClient,
     ColiRefinementMode, ElevenLabsRealtimeClient, ElevenLabsRecognitionMode,
@@ -443,10 +444,17 @@ async fn run_streaming_asr(
                 .await
         }
         AsrProviderType::Qwen => {
-            let client = QwenRealtimeClient::new(config.clone());
-            client
-                .stream_session(16000, 1, rx, cancel.clone(), history, on_event)
-                .await
+            if qwen_uses_inference_protocol(&config.qwen_model) {
+                let client = FunAsrRealtimeClient::new_qwen(config.clone());
+                client
+                    .stream_session(16000, 1, rx, cancel.clone(), history, on_event)
+                    .await
+            } else {
+                let client = QwenRealtimeClient::new(config.clone());
+                client
+                    .stream_session(16000, 1, rx, cancel.clone(), history, on_event)
+                    .await
+            }
         }
         AsrProviderType::Gemini => {
             unreachable!("Gemini should use file-based transcription")

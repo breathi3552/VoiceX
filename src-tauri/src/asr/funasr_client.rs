@@ -1,4 +1,4 @@
-//! DashScope Fun-ASR realtime WebSocket client.
+//! DashScope `/inference` realtime ASR client shared by Fun-ASR and Qwen-Audio ASR.
 
 use std::sync::Arc;
 
@@ -16,11 +16,56 @@ use super::protocol::{AsrError, AsrEvent, AsrPhase};
 
 pub struct FunAsrRealtimeClient {
     config: AsrConfig,
+    provider: InferenceProvider,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum InferenceProvider {
+    FunAsr,
+    QwenAudio,
 }
 
 impl FunAsrRealtimeClient {
     pub fn new(config: AsrConfig) -> Self {
-        Self { config }
+        Self {
+            config,
+            provider: InferenceProvider::FunAsr,
+        }
+    }
+
+    pub fn new_qwen(config: AsrConfig) -> Self {
+        Self {
+            config,
+            provider: InferenceProvider::QwenAudio,
+        }
+    }
+
+    fn model(&self) -> &str {
+        match self.provider {
+            InferenceProvider::FunAsr => &self.config.funasr_model,
+            InferenceProvider::QwenAudio => &self.config.qwen_model,
+        }
+    }
+
+    fn ws_url(&self) -> &str {
+        match self.provider {
+            InferenceProvider::FunAsr => &self.config.funasr_ws_url,
+            InferenceProvider::QwenAudio => &self.config.qwen_ws_url,
+        }
+    }
+
+    fn api_key(&self) -> &str {
+        match self.provider {
+            InferenceProvider::FunAsr => &self.config.funasr_api_key,
+            InferenceProvider::QwenAudio => &self.config.qwen_api_key,
+        }
+    }
+
+    fn language(&self) -> &str {
+        match self.provider {
+            InferenceProvider::FunAsr => &self.config.funasr_language,
+            InferenceProvider::QwenAudio => &self.config.qwen_language,
+        }
     }
 
     pub async fn stream_session<F>(
@@ -37,18 +82,23 @@ impl FunAsrRealtimeClient {
     {
         if !self.config.is_valid() {
             return Err(AsrError::ConnectionFailed(
-                "Invalid Fun-ASR configuration".to_string(),
+                "Invalid DashScope inference ASR configuration".to_string(),
             ));
         }
 
-        let stream_rate = target_sample_rate(&self.config.funasr_model);
-        let ws_url = self.config.funasr_ws_url.trim().to_string();
+        let model = self.model().trim().to_string();
+        let stream_rate = target_sample_rate(&model);
+        let ws_url = if self.provider == InferenceProvider::QwenAudio {
+            qwen_inference_ws_url(self.ws_url(), &self.config.qwen_workspace_id)?
+        } else {
+            inference_ws_url(self.ws_url())?
+        };
         let mut req = ws_url
             .into_client_request()
             .map_err(|e| AsrError::ConnectionFailed(e.to_string()).in_phase(AsrPhase::Connect))?;
         {
             let headers = req.headers_mut();
-            let auth = format!("Bearer {}", self.config.funasr_api_key.trim());
+            let auth = format!("Bearer {}", self.api_key().trim());
             let auth_value = HeaderValue::from_str(&auth).map_err(|e| {
                 AsrError::ConnectionFailed(format!("Invalid authorization header: {}", e))
                     .in_phase(AsrPhase::Connect)
@@ -57,36 +107,45 @@ impl FunAsrRealtimeClient {
         }
 
         let (ws_stream, _) = connect_async(req).await.map_err(|e| {
-            AsrError::ConnectionFailed(format!("Fun-ASR WebSocket connect failed: {}", e))
-                .in_phase(AsrPhase::Connect)
+            AsrError::ConnectionFailed(format!(
+                "DashScope inference WebSocket connect failed: {}",
+                e
+            ))
+            .in_phase(AsrPhase::Connect)
         })?;
         let (mut ws_write, mut ws_read) = ws_stream.split();
 
         // 上下文增强：把 VoiceX 用户词典与最近识别历史组装成 input.context。
-        // 仅 fun-asr-realtime 与 fun-asr-realtime-2025-11-07 支持（据阿里云官方文档 2026-07-22）。
+        // Qwen-Audio 3.0 Streaming 与两个 Fun-ASR 主版本支持该能力。
         // 不支持的模型若开了上下文，显式 warn 而非静默吞（遵守 AGENTS.md 防静默失败规则）。
         let context_payload = build_context_payload(
-            &self.config.funasr_model,
+            &model,
             &self.config.hotwords,
             &history,
             self.config.enable_context,
         );
         match &context_payload {
             Some(ctx) => log::info!(
-                "Fun-ASR realtime: 上下文增强已启用 (model={}, context_chars={})",
-                self.config.funasr_model,
+                "DashScope inference ASR: 上下文增强已启用 (model={}, context_chars={})",
+                model,
                 context_text_len(ctx),
             ),
             None => {
                 if self.config.enable_context || !self.config.hotwords.is_empty() {
-                    if !model_supports_context(&self.config.funasr_model) {
+                    if !model_supports_context(&model) {
                         log::warn!(
-                            "Fun-ASR realtime: 上下文增强被忽略——模型 {} 不支持（仅 fun-asr-realtime 与 fun-asr-realtime-2025-11-07 支持）",
-                            self.config.funasr_model
+                            "DashScope inference ASR: 上下文增强被忽略——模型 {} 不支持",
+                            model
                         );
-                    } else if context_text_for(&self.config.hotwords, &history, self.config.enable_context).is_empty() {
+                    } else if context_text_for(
+                        &self.config.hotwords,
+                        &history,
+                        self.config.enable_context,
+                    )
+                    .is_empty()
+                    {
                         log::debug!(
-                            "Fun-ASR realtime: 上下文增强已开启但词表与历史均为空，跳过"
+                            "DashScope inference ASR: 上下文增强已开启但词表与历史均为空，跳过"
                         );
                     }
                 }
@@ -95,17 +154,26 @@ impl FunAsrRealtimeClient {
 
         let task_id = uuid::Uuid::new_v4().to_string();
         let start_message = build_run_task_message(
-            &self.config,
             &task_id,
             stream_rate,
+            &model,
+            self.language(),
             context_payload.as_ref(),
+            if self.provider == InferenceProvider::QwenAudio {
+                Some(&self.config)
+            } else {
+                None
+            },
         )?;
         ws_write
             .send(Message::Text(start_message.into()))
             .await
             .map_err(|e| {
-                AsrError::ConnectionFailed(format!("Fun-ASR run-task send failed: {}", e))
-                    .in_phase(AsrPhase::Handshake)
+                AsrError::ConnectionFailed(format!(
+                    "DashScope inference run-task send failed: {}",
+                    e
+                ))
+                .in_phase(AsrPhase::Handshake)
             })?;
         wait_for_task_started(&mut ws_read, &task_id).await?;
 
@@ -116,7 +184,7 @@ impl FunAsrRealtimeClient {
             tokio::spawn(async move { read_events(ws_read, reader_cancel, on_event_reader).await });
 
         write_audio_and_finish(
-            &self.config,
+            &model,
             sample_rate,
             channels,
             stream_rate,
@@ -128,10 +196,19 @@ impl FunAsrRealtimeClient {
         .await?;
 
         reader_handle.await.map_err(|e| {
-            AsrError::ConnectionFailed(format!("Fun-ASR reader task join failed: {}", e))
-                .in_phase(AsrPhase::Finalizing)
+            AsrError::ConnectionFailed(format!(
+                "DashScope inference reader task join failed: {}",
+                e
+            ))
+            .in_phase(AsrPhase::Finalizing)
         })?
     }
+}
+
+pub fn qwen_uses_inference_protocol(model: &str) -> bool {
+    model
+        .trim()
+        .starts_with("qwen-audio-3.0-asr-flash-streaming")
 }
 
 async fn wait_for_task_started(
@@ -345,7 +422,7 @@ async fn read_events(
 }
 
 async fn write_audio_and_finish(
-    config: &AsrConfig,
+    model: &str,
     sample_rate: u32,
     channels: u16,
     stream_rate: u32,
@@ -398,26 +475,50 @@ async fn write_audio_and_finish(
         })?;
 
     log::debug!(
-        "Fun-ASR finish-task sent (model={}, stream_rate={})",
-        config.funasr_model,
+        "DashScope inference finish-task sent (model={}, stream_rate={})",
+        model,
         stream_rate
     );
     Ok(())
 }
 
 fn build_run_task_message(
-    config: &AsrConfig,
     task_id: &str,
     sample_rate: u32,
+    model: &str,
+    language: &str,
     context: Option<&Value>,
+    qwen_config: Option<&AsrConfig>,
 ) -> Result<String, AsrError> {
     let mut parameters = json!({
         "format": "pcm",
         "sample_rate": sample_rate
     });
 
-    if let Some(language_hint) = primary_language_hint(&config.funasr_language) {
-        parameters["language_hints"] = json!([language_hint]);
+    let language_hints = language_hints(language, qwen_config.is_some());
+    if !language_hints.is_empty() {
+        parameters["language_hints"] = json!(language_hints);
+    }
+
+    if let Some(config) = qwen_config {
+        parameters["semantic_punctuation_enabled"] =
+            json!(config.qwen_semantic_punctuation_enabled);
+        parameters["max_sentence_silence"] =
+            json!(config.qwen_max_sentence_silence_ms.clamp(200, 6000));
+        parameters["heartbeat"] = json!(config.qwen_heartbeat);
+
+        let vocabulary = build_instant_vocabulary(&config.hotwords, config.qwen_hotword_weight);
+        if !vocabulary.is_empty() {
+            parameters["vocabulary"] = Value::Object(vocabulary);
+            if !config.qwen_vocabulary_id.trim().is_empty() {
+                log::warn!(
+                    "Qwen-Audio ASR: inline dictionary hotwords override vocabulary_id={} for this request",
+                    config.qwen_vocabulary_id.trim()
+                );
+            }
+        } else if !config.qwen_vocabulary_id.trim().is_empty() {
+            parameters["vocabulary_id"] = json!(config.qwen_vocabulary_id.trim());
+        }
     }
 
     let mut input = serde_json::Map::new();
@@ -435,22 +536,26 @@ fn build_run_task_message(
             "task_group": "audio",
             "task": "asr",
             "function": "recognition",
-            "model": config.funasr_model.trim(),
+            "model": model.trim(),
             "parameters": parameters,
             "input": Value::Object(input)
         }
     }))
-    .map_err(|e| AsrError::ProtocolError(format!("Failed to serialize Fun-ASR run-task: {}", e)))
+    .map_err(|e| {
+        AsrError::ProtocolError(format!(
+            "Failed to serialize DashScope inference run-task: {}",
+            e
+        ))
+    })
 }
 
-/// 据阿里云官方文档（更新于 2026-07-22），Fun-ASR 上下文增强仅适用于：
-/// - 实时：fun-asr-realtime、fun-asr-realtime-2025-11-07
-/// 注意最新快照 fun-asr-realtime-2026-02-28 不支持，开了会被静默忽略。
+/// 支持 `input.context` 的 DashScope `/inference` 实时 ASR 模型。
+/// 注意 fun-asr-realtime-2026-02-28 不支持，开了会被服务端静默忽略。
 fn model_supports_context(model: &str) -> bool {
     let trimmed = model.trim();
     matches!(
         trimmed,
-        "fun-asr-realtime" | "fun-asr-realtime-2025-11-07"
+        "fun-asr-realtime" | "fun-asr-realtime-2025-11-07" | "qwen-audio-3.0-asr-flash-streaming"
     )
 }
 
@@ -574,11 +679,139 @@ fn task_failed_error(header: &serde_json::Map<String, Value>) -> AsrError {
     AsrError::ServerError(format!("{}: {}", error_code, error_message))
 }
 
-fn primary_language_hint(raw: &str) -> Option<String> {
+fn inference_ws_url(raw_url: &str) -> Result<String, AsrError> {
+    let trimmed = raw_url.trim().trim_end_matches('/');
+    let (scheme, rest) = trimmed.split_once("://").ok_or_else(|| {
+        AsrError::ConnectionFailed(format!("Invalid DashScope WebSocket endpoint: {}", raw_url))
+    })?;
+    if !matches!(scheme, "ws" | "wss") {
+        return Err(AsrError::ConnectionFailed(format!(
+            "DashScope realtime endpoint must use ws:// or wss://: {}",
+            raw_url
+        )));
+    }
+    let host = rest.split(['/', '?']).next().unwrap_or_default().trim();
+    if host.is_empty() {
+        return Err(AsrError::ConnectionFailed(format!(
+            "Invalid DashScope WebSocket endpoint: {}",
+            raw_url
+        )));
+    }
+    Ok(format!("{}://{}/api-ws/v1/inference", scheme, host))
+}
+
+fn qwen_inference_ws_url(raw_url: &str, workspace_id: &str) -> Result<String, AsrError> {
+    let trimmed = raw_url.trim();
+    let scheme = trimmed
+        .split_once("://")
+        .map(|(scheme, _)| scheme)
+        .unwrap_or_default();
+    if !matches!(scheme, "ws" | "wss") {
+        return Err(AsrError::ConnectionFailed(format!(
+            "Qwen-Audio realtime endpoint must use ws:// or wss://: {}",
+            raw_url
+        )));
+    }
+    let host = qwen_workspace_host(raw_url, workspace_id)?;
+    Ok(format!("{}://{}/api-ws/v1/inference", scheme, host))
+}
+
+pub(crate) fn qwen_workspace_host(raw_url: &str, workspace_id: &str) -> Result<String, AsrError> {
+    let without_scheme = raw_url
+        .trim()
+        .split_once("://")
+        .map(|(_, rest)| rest)
+        .ok_or_else(|| {
+            AsrError::ConnectionFailed(format!("Invalid Qwen-Audio endpoint: {}", raw_url))
+        })?;
+    let host = without_scheme
+        .split(['/', '?'])
+        .next()
+        .unwrap_or_default()
+        .trim();
+    if host.is_empty() {
+        return Err(AsrError::ConnectionFailed(format!(
+            "Invalid Qwen-Audio endpoint: {}",
+            raw_url
+        )));
+    }
+    if host.ends_with(".maas.aliyuncs.com") {
+        return Ok(host.to_string());
+    }
+
+    let workspace_id = workspace_id.trim();
+    if workspace_id.is_empty() {
+        return Err(AsrError::ConnectionFailed(
+            "Qwen-Audio 3.0 ASR requires an Alibaba Cloud Workspace ID or a full workspace-scoped endpoint".to_string(),
+        ));
+    }
+    if !workspace_id
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || ch == '-')
+    {
+        return Err(AsrError::ConnectionFailed(
+            "Alibaba Cloud Workspace ID contains invalid characters".to_string(),
+        ));
+    }
+
+    let region_host = if host == "dashscope-intl.aliyuncs.com" || host.contains("ap-southeast-1") {
+        "ap-southeast-1.maas.aliyuncs.com"
+    } else {
+        "cn-beijing.maas.aliyuncs.com"
+    };
+    Ok(format!("{}.{}", workspace_id, region_host))
+}
+
+pub(crate) fn language_hints(raw: &str, supports_multiple: bool) -> Vec<String> {
+    let limit = if supports_multiple { 4 } else { 1 };
     raw.split([',', ' ', '\n', '\t'])
         .map(str::trim)
-        .find(|part| !part.is_empty())
+        .filter(|part| !part.is_empty() && *part != "auto")
+        .take(limit)
         .map(str::to_string)
+        .collect()
+}
+
+pub(crate) fn build_instant_vocabulary(
+    hotwords: &[String],
+    configured_weight: u32,
+) -> serde_json::Map<String, Value> {
+    let weight = match configured_weight {
+        1..=5 | 50 => configured_weight,
+        _ => 4,
+    };
+    let max_words = if weight == 50 { 50 } else { 2000 };
+    let mut vocabulary = serde_json::Map::new();
+    let mut skipped = 0usize;
+
+    for word in hotwords {
+        let word = word.trim();
+        if word.is_empty() || vocabulary.contains_key(word) {
+            continue;
+        }
+        if vocabulary.len() >= max_words {
+            skipped += 1;
+            continue;
+        }
+        let valid = if word.is_ascii() {
+            word.split_whitespace().count() <= 7
+        } else {
+            word.chars().count() <= 15
+        };
+        if !valid {
+            skipped += 1;
+            continue;
+        }
+        vocabulary.insert(word.to_string(), json!(weight));
+    }
+
+    if skipped > 0 {
+        log::warn!(
+            "Qwen-Audio ASR: skipped {} dictionary entries that exceed hotword limits",
+            skipped
+        );
+    }
+    vocabulary
 }
 
 fn prepare_pcm_chunk(chunk: Vec<u8>, sample_rate: u32, channels: u16, stream_rate: u32) -> Vec<u8> {
@@ -600,8 +833,10 @@ fn target_sample_rate(model: &str) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_context_payload, build_run_task_message, context_text_for, context_text_len,
-        model_supports_context, primary_language_hint, target_sample_rate,
+        build_context_payload, build_instant_vocabulary, build_run_task_message, context_text_for,
+        context_text_len, inference_ws_url, language_hints, model_supports_context,
+        qwen_inference_ws_url, qwen_uses_inference_protocol, qwen_workspace_host,
+        target_sample_rate,
     };
     use crate::asr::AsrConfig;
 
@@ -613,8 +848,8 @@ mod tests {
 
     #[test]
     fn funasr_language_hint_uses_first_non_empty_value() {
-        assert_eq!(primary_language_hint("zh, en").as_deref(), Some("zh"));
-        assert_eq!(primary_language_hint("  ").as_deref(), None);
+        assert_eq!(language_hints("zh, en", false), vec!["zh"]);
+        assert!(language_hints("  ", false).is_empty());
     }
 
     #[test]
@@ -622,7 +857,15 @@ mod tests {
         let mut config = AsrConfig::default();
         config.funasr_model = "fun-asr-realtime".to_string();
         config.funasr_language = "zh, en".to_string();
-        let msg = build_run_task_message(&config, "task-1", 16_000, None).unwrap();
+        let msg = build_run_task_message(
+            "task-1",
+            16_000,
+            &config.funasr_model,
+            &config.funasr_language,
+            None,
+            None,
+        )
+        .unwrap();
         assert!(msg.contains("\"action\":\"run-task\""));
         assert!(msg.contains("\"model\":\"fun-asr-realtime\""));
         assert!(msg.contains("\"sample_rate\":16000"));
@@ -642,7 +885,15 @@ mod tests {
             false,
         )
         .expect("context payload should be built for supported model");
-        let msg = build_run_task_message(&config, "task-2", 16_000, Some(&context)).unwrap();
+        let msg = build_run_task_message(
+            "task-2",
+            16_000,
+            &config.funasr_model,
+            &config.funasr_language,
+            Some(&context),
+            None,
+        )
+        .unwrap();
         assert!(msg.contains("\"context\""));
         assert!(msg.contains("\"input_text\""));
         assert!(msg.contains("VoiceX"));
@@ -650,20 +901,104 @@ mod tests {
     }
 
     #[test]
-    fn model_supports_context_only_for_two_official_models() {
-        // 据阿里云官方文档 2026-07-22：仅这两个模型支持上下文增强
+    fn model_supports_context_matches_official_models() {
         assert!(model_supports_context("fun-asr-realtime"));
         assert!(model_supports_context("fun-asr-realtime-2025-11-07"));
         assert!(model_supports_context("  fun-asr-realtime  ")); // 容忍空白
+        assert!(model_supports_context("qwen-audio-3.0-asr-flash-streaming"));
 
         // 最新快照不支持——这是最容易踩的坑
         assert!(!model_supports_context("fun-asr-realtime-2026-02-28"));
         // 8k 系列不支持
         assert!(!model_supports_context("fun-asr-flash-8k-realtime"));
-        assert!(!model_supports_context("fun-asr-flash-8k-realtime-2026-01-28"));
+        assert!(!model_supports_context(
+            "fun-asr-flash-8k-realtime-2026-01-28"
+        ));
         // 非实时模式不支持（同步/异步都不支持上下文增强之外的模型）
         assert!(!model_supports_context("fun-asr"));
         assert!(!model_supports_context("fun-asr-flash-2026-06-15"));
+    }
+
+    #[test]
+    fn qwen_audio_run_task_includes_protocol_features() {
+        let mut config = AsrConfig::default();
+        config.qwen_model = "qwen-audio-3.0-asr-flash-streaming".to_string();
+        config.qwen_language = "zh, en, ja, ko, fr".to_string();
+        config.hotwords = vec!["VoiceX".to_string(), "连续刚构桥".to_string()];
+        config.qwen_hotword_weight = 50;
+        config.qwen_semantic_punctuation_enabled = true;
+        config.qwen_max_sentence_silence_ms = 900;
+        config.qwen_heartbeat = true;
+
+        let msg = build_run_task_message(
+            "task-qwen",
+            16_000,
+            &config.qwen_model,
+            &config.qwen_language,
+            None,
+            Some(&config),
+        )
+        .unwrap();
+        let payload: serde_json::Value = serde_json::from_str(&msg).unwrap();
+        let parameters = &payload["payload"]["parameters"];
+        assert_eq!(
+            parameters["language_hints"],
+            serde_json::json!(["zh", "en", "ja", "ko"])
+        );
+        assert_eq!(parameters["vocabulary"]["VoiceX"], 50);
+        assert_eq!(parameters["vocabulary"]["连续刚构桥"], 50);
+        assert_eq!(parameters["semantic_punctuation_enabled"], true);
+        assert_eq!(parameters["max_sentence_silence"], 900);
+        assert_eq!(parameters["heartbeat"], true);
+    }
+
+    #[test]
+    fn qwen_audio_helpers_validate_endpoint_and_hotwords() {
+        assert!(qwen_uses_inference_protocol(
+            "qwen-audio-3.0-asr-flash-streaming"
+        ));
+        assert_eq!(
+            inference_ws_url("wss://dashscope.aliyuncs.com/api-ws/v1/realtime").unwrap(),
+            "wss://dashscope.aliyuncs.com/api-ws/v1/inference"
+        );
+        assert_eq!(language_hints("zh, en, ja, ko, fr", true).len(), 4);
+
+        let vocabulary = build_instant_vocabulary(
+            &[
+                "VoiceX".to_string(),
+                "VoiceX".to_string(),
+                "one two three four five six seven eight".to_string(),
+            ],
+            4,
+        );
+        assert_eq!(vocabulary.len(), 1);
+        assert_eq!(vocabulary["VoiceX"], 4);
+
+        let super_hotwords: Vec<String> = (0..60).map(|index| format!("word{}", index)).collect();
+        assert_eq!(build_instant_vocabulary(&super_hotwords, 50).len(), 50);
+    }
+
+    #[test]
+    fn qwen_audio_workspace_endpoint_is_explicit() {
+        assert_eq!(
+            qwen_inference_ws_url(
+                "wss://dashscope.aliyuncs.com/api-ws/v1/realtime",
+                "workspace-123"
+            )
+            .unwrap(),
+            "wss://workspace-123.cn-beijing.maas.aliyuncs.com/api-ws/v1/inference"
+        );
+        assert_eq!(
+            qwen_workspace_host(
+                "wss://existing.ap-southeast-1.maas.aliyuncs.com/api-ws/v1/inference",
+                ""
+            )
+            .unwrap(),
+            "existing.ap-southeast-1.maas.aliyuncs.com"
+        );
+        assert!(
+            qwen_inference_ws_url("wss://dashscope.aliyuncs.com/api-ws/v1/inference", "").is_err()
+        );
     }
 
     #[test]
@@ -680,8 +1015,7 @@ mod tests {
 
     #[test]
     fn build_context_payload_returns_none_when_no_hotwords_and_no_history() {
-        let payload =
-            build_context_payload("fun-asr-realtime", &[], &[], false);
+        let payload = build_context_payload("fun-asr-realtime", &[], &[], false);
         assert!(payload.is_none());
     }
 

@@ -440,10 +440,11 @@ fn merge_transcript(accumulated: &str, incoming: &str) -> String {
 }
 
 fn build_ws_url(base_url: &str, model: &str) -> String {
-    let separator = if base_url.contains('?') { '&' } else { '?' };
+    let normalized = base_url.replace("/api-ws/v1/inference", "/api-ws/v1/realtime");
+    let separator = if normalized.contains('?') { '&' } else { '?' };
     format!(
         "{}{}model={}",
-        base_url,
+        normalized,
         separator,
         urlencoding::encode(model)
     )
