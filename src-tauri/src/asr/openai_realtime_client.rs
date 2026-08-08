@@ -6,7 +6,6 @@ use std::time::{Duration, Instant};
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
 use futures_util::{SinkExt, StreamExt};
-use reqwest::Client;
 use serde_json::{json, Value};
 use tokio::sync::mpsc::Receiver;
 use tokio_tungstenite::{
@@ -54,7 +53,6 @@ impl OpenAIRealtimeClient {
         let stream_rate = 24_000u32;
         let diagnostics_enabled = self.config.enable_diagnostics;
         let ws_url = build_realtime_ws_url(&self.config.openai_asr_base_url);
-        let client_secret = self.create_transcription_session().await?;
 
         log::info!(
             "OpenAI Realtime connecting (capture {} Hz -> stream {} Hz, {} ch, transcription_model={})",
@@ -71,16 +69,28 @@ impl OpenAIRealtimeClient {
             let headers = req.headers_mut();
             headers.insert(
                 "Authorization",
-                HeaderValue::from_str(&format!("Bearer {}", client_secret))
+                HeaderValue::from_str(&format!("Bearer {}", self.config.openai_asr_api_key))
                     .map_err(|e| AsrError::ConnectionFailed(e.to_string()))?,
             );
-            headers.insert("OpenAI-Beta", HeaderValue::from_static("realtime=v1"));
         }
 
         let (ws_stream, _) = connect_async(req)
             .await
             .map_err(|e| AsrError::ConnectionFailed(format!("OpenAI Realtime connect: {e}")))?;
         let (mut ws_write, mut ws_read) = ws_stream.split();
+
+        // The GA API configures the session over the socket rather than at
+        // session-creation time, so this must land before any audio is sent.
+        let session_update = build_session_update_event(&self.config);
+        if diagnostics_enabled {
+            log::info!("OpenAI Realtime session.update payload: {}", session_update);
+        }
+        ws_write
+            .send(Message::Text(session_update.to_string()))
+            .await
+            .map_err(|e| {
+                AsrError::ConnectionFailed(format!("Failed to send OpenAI Realtime session.update: {e}"))
+            })?;
 
         loop {
             let msg = tokio::select! {
@@ -111,11 +121,7 @@ impl OpenAIRealtimeClient {
                     }
 
                     let event_type = payload.get("type").and_then(Value::as_str).unwrap_or("");
-                    if event_type == "session.created"
-                        || event_type == "transcription_session.created"
-                        || event_type == "session.updated"
-                        || event_type == "transcription_session.updated"
-                    {
+                    if event_type == "session.created" || event_type == "session.updated" {
                         log::info!("OpenAI Realtime {} received", event_type);
                         break;
                     }
@@ -346,104 +352,83 @@ impl OpenAIRealtimeClient {
         }
     }
 
-    async fn create_transcription_session(&self) -> Result<String, AsrError> {
-        let url = format!(
-            "{}/realtime/transcription_sessions",
-            self.config.openai_asr_base_url.trim_end_matches('/')
-        );
-        let body = build_transcription_session_request(&self.config);
-
-        if self.config.enable_diagnostics {
-            log::info!("OpenAI Realtime create session payload: {}", body);
-        }
-
-        let client = Client::new();
-        let response = client
-            .post(&url)
-            .bearer_auth(&self.config.openai_asr_api_key)
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| {
-                AsrError::ConnectionFailed(format!(
-                    "Failed to create OpenAI Realtime transcription session: {e}"
-                ))
-            })?;
-
-        let status = response.status();
-        let payload: Value = response.json().await.map_err(|e| {
-            AsrError::ProtocolError(format!(
-                "Invalid OpenAI Realtime transcription session response: {e}"
-            ))
-        })?;
-
-        if self.config.enable_diagnostics {
-            log::info!("OpenAI Realtime create session response: {}", payload);
-        }
-
-        if !status.is_success() {
-            return Err(AsrError::ServerError(
-                extract_server_error(&payload).unwrap_or_else(|| {
-                    format!("OpenAI Realtime transcription session HTTP {}", status)
-                }),
-            ));
-        }
-
-        payload
-            .get("client_secret")
-            .and_then(|v| v.get("value"))
-            .and_then(Value::as_str)
-            .map(ToOwned::to_owned)
-            .ok_or_else(|| {
-                AsrError::ProtocolError(
-                    "OpenAI Realtime transcription session missing client_secret.value".to_string(),
-                )
-            })
-    }
 }
 
+/// Build the GA realtime WebSocket URL.
+///
+/// Transcription sessions are selected with `?intent=transcription`; the
+/// `?model=` parameter used by speech-to-speech sessions is rejected here
+/// because a transcription model is not a valid session model.
 fn build_realtime_ws_url(base_url: &str) -> String {
     let trimmed = base_url.trim().trim_end_matches('/');
 
-    if let Some(rest) = trimmed.strip_prefix("https://") {
-        return format!("wss://{rest}/realtime");
-    }
-    if let Some(rest) = trimmed.strip_prefix("http://") {
-        return format!("ws://{rest}/realtime");
-    }
-    if trimmed.starts_with("wss://") || trimmed.starts_with("ws://") {
-        return format!("{trimmed}/realtime");
-    }
+    let base = if let Some(rest) = trimmed.strip_prefix("https://") {
+        format!("wss://{rest}")
+    } else if let Some(rest) = trimmed.strip_prefix("http://") {
+        format!("ws://{rest}")
+    } else if trimmed.starts_with("wss://") || trimmed.starts_with("ws://") {
+        trimmed.to_string()
+    } else {
+        format!("wss://{trimmed}")
+    };
 
-    format!("wss://{trimmed}/realtime")
+    format!("{base}/realtime?intent=transcription")
 }
 
-fn build_transcription_session_request(config: &AsrConfig) -> Value {
-    let prompt = build_transcription_prompt(config.openai_asr_prompt.trim(), &config.hotwords);
-    let mut body = json!({
-        "input_audio_format": "pcm16",
-        "input_audio_transcription": {
-            "model": config.openai_asr_model.trim(),
-        },
-        "turn_detection": {
-            "type": "server_vad",
-            "threshold": 0.5,
-            "prefix_padding_ms": 300,
-            "silence_duration_ms": 500,
+fn build_session_update_event(config: &AsrConfig) -> Value {
+    let model = config.openai_asr_model.trim();
+    let mut transcription = json!({ "model": model });
+
+    if super::openai_client::model_supports_keywords(model) {
+        let languages = super::openai_client::parse_language_list(&config.openai_asr_language);
+        if !languages.is_empty() {
+            transcription["languages"] = json!(languages);
+        }
+        let keywords = super::openai_client::cleaned_openai_keywords(&config.hotwords);
+        if !keywords.is_empty() {
+            transcription["keywords"] = json!(keywords);
+        }
+        let prompt = config.openai_asr_prompt.trim();
+        if !prompt.is_empty() {
+            transcription["prompt"] = json!(prompt);
+        }
+        let delay = config.openai_asr_delay.trim();
+        if !delay.is_empty() {
+            transcription["delay"] = json!(delay);
+        }
+    } else {
+        // Legacy transcription models have no keyword channel, so the dictionary
+        // has to ride along inside the prompt.
+        if let Some(language) =
+            super::openai_client::parse_language_list(&config.openai_asr_language).first()
+        {
+            transcription["language"] = json!(language);
+        }
+        let prompt = build_transcription_prompt(config.openai_asr_prompt.trim(), &config.hotwords);
+        if !prompt.is_empty() {
+            transcription["prompt"] = json!(prompt);
+        }
+    }
+
+    // `null` means "no server-side VAD": VoiceX is push-to-talk and commits the
+    // buffer itself when the hotkey is released. It is also required rather than
+    // merely preferred — gpt-live-transcribe rejects any turn_detection block.
+    let mut session = json!({
+        "type": "transcription",
+        "audio": {
+            "input": {
+                "format": { "type": "audio/pcm", "rate": 24_000 },
+                "transcription": transcription,
+                "turn_detection": Value::Null,
+            }
         }
     });
 
-    if !config.openai_asr_language.trim().is_empty() {
-        body["input_audio_transcription"]["language"] = json!(config.openai_asr_language.trim());
-    }
-    if !prompt.is_empty() {
-        body["input_audio_transcription"]["prompt"] = json!(prompt);
-    }
     if config.enable_diagnostics {
-        body["include"] = json!(["item.input_audio_transcription.logprobs"]);
+        session["include"] = json!(["item.input_audio_transcription.logprobs"]);
     }
 
-    body
+    json!({ "type": "session.update", "session": session })
 }
 
 fn extract_server_error(payload: &Value) -> Option<String> {
@@ -724,4 +709,74 @@ fn merge_delta_text(existing: &mut String, incoming: &str) {
         return;
     }
     existing.push_str(incoming);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{build_realtime_ws_url, build_session_update_event};
+    use crate::asr::config::AsrConfig;
+
+    fn config(model: &str) -> AsrConfig {
+        AsrConfig {
+            openai_asr_model: model.to_string(),
+            openai_asr_language: "zh, en".to_string(),
+            openai_asr_prompt: "A developer dictating a note.".to_string(),
+            openai_asr_delay: "low".to_string(),
+            hotwords: vec!["Kysely".to_string(), "Drizzle".to_string()],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn ws_url_selects_the_transcription_intent() {
+        assert_eq!(
+            build_realtime_ws_url("https://api.openai.com/v1"),
+            "wss://api.openai.com/v1/realtime?intent=transcription"
+        );
+        assert_eq!(
+            build_realtime_ws_url("http://localhost:8080/v1/"),
+            "ws://localhost:8080/v1/realtime?intent=transcription"
+        );
+    }
+
+    #[test]
+    fn session_update_uses_the_ga_nesting() {
+        let event = build_session_update_event(&config("gpt-live-transcribe"));
+        assert_eq!(event["type"], "session.update");
+        assert_eq!(event["session"]["type"], "transcription");
+
+        let input = &event["session"]["audio"]["input"];
+        assert_eq!(input["format"]["type"], "audio/pcm");
+        assert_eq!(input["format"]["rate"], 24_000);
+
+        let tr = &input["transcription"];
+        assert_eq!(tr["model"], "gpt-live-transcribe");
+        assert_eq!(tr["languages"], serde_json::json!(["zh", "en"]));
+        assert_eq!(tr["keywords"], serde_json::json!(["Kysely", "Drizzle"]));
+        assert_eq!(tr["delay"], "low");
+        assert_eq!(tr["prompt"], "A developer dictating a note.");
+        // The dictionary must not leak back into the prompt on modern models.
+        assert!(!tr["prompt"].as_str().unwrap().contains("Kysely"));
+    }
+
+    #[test]
+    fn legacy_models_fall_back_to_prompt_stuffing() {
+        let event = build_session_update_event(&config("gpt-4o-transcribe"));
+        let tr = &event["session"]["audio"]["input"]["transcription"];
+        assert!(tr.get("keywords").is_none());
+        assert!(tr.get("languages").is_none());
+        assert!(tr.get("delay").is_none());
+        assert_eq!(tr["language"], "zh");
+        assert!(tr["prompt"].as_str().unwrap().contains("Kysely"));
+    }
+
+    #[test]
+    fn dump_live_payload_for_manual_replay() {
+        // Printed with --nocapture so the exact wire payload can be replayed
+        // against the real API during protocol changes.
+        println!(
+            "{}",
+            serde_json::to_string(&build_session_update_event(&config("gpt-live-transcribe"))).unwrap()
+        );
+    }
 }

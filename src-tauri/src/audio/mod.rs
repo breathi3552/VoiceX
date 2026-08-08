@@ -10,7 +10,7 @@ use std::{path::PathBuf, sync::Mutex};
 
 pub use capture::{
     AudioCaptureError, AudioCaptureHandle, AudioCaptureService, AudioConfig, AudioRecordingResult,
-    AudioVisualizationFrame,
+    AudioVisualizationFrame, write_temp_wav,
 };
 pub use chunker::AudioChunker;
 pub use device::{AudioDevice, AudioInputDeviceManager};

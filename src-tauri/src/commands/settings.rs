@@ -82,6 +82,8 @@ pub struct AppSettings {
     pub openai_asr_language: String,
     pub openai_asr_prompt: String,
     pub openai_asr_mode: String,                  // "batch" | "realtime"
+    // "" | "minimal" | "low" | "medium" | "high" | "xhigh" (realtime only)
+    pub openai_asr_delay: String,
     pub openai_asr_post_recording_refine: String, // "off" | "batch_refine"
 
     // ASR Provider: ElevenLabs Speech-to-Text
@@ -112,6 +114,10 @@ pub struct AppSettings {
     pub mimo_language: String,
 
     // Local ASR Provider: `coli`
+    pub qwen_local_command_path: String,
+    pub qwen_local_model_dir: String,
+    pub qwen_local_language: String,
+    pub qwen_local_use_dictionary: bool,
     pub coli_command_path: String,
     pub coli_use_vad: bool,
     pub coli_asr_interval_ms: u32,
@@ -286,11 +292,12 @@ impl Default for AppSettings {
             cohere_model: "cohere-transcribe-03-2026".to_string(),
             cohere_language: "zh".to_string(),
             openai_asr_api_key: String::new(),
-            openai_asr_model: "gpt-4o-transcribe".to_string(),
+            openai_asr_model: "gpt-transcribe".to_string(),
             openai_asr_base_url: "https://api.openai.com/v1".to_string(),
             openai_asr_language: String::new(),
             openai_asr_prompt: "Transcribe faithfully with natural punctuation and capitalization. Preserve the original wording and do not omit spoken content.".to_string(),
             openai_asr_mode: "batch".to_string(),
+            openai_asr_delay: String::new(),
             openai_asr_post_recording_refine: "off".to_string(),
             elevenlabs_api_key: String::new(),
             elevenlabs_recognition_mode: "realtime".to_string(),
@@ -311,6 +318,10 @@ impl Default for AppSettings {
             mimo_model: "mimo-v2.5-asr".to_string(),
             mimo_base_url: "https://api.xiaomimimo.com/v1".to_string(),
             mimo_language: "auto".to_string(),
+            qwen_local_command_path: String::new(),
+            qwen_local_model_dir: String::new(),
+            qwen_local_language: "Chinese".to_string(),
+            qwen_local_use_dictionary: true,
             coli_command_path: String::new(),
             coli_use_vad: true,
             coli_asr_interval_ms: 1000,
@@ -403,6 +414,7 @@ fn probe_provider_name(provider: &crate::asr::AsrProviderType) -> &'static str {
         crate::asr::AsrProviderType::StepAudio => "StepAudio 2.5 ASR",
         crate::asr::AsrProviderType::Mimo => "Xiaomi MiMo ASR",
         crate::asr::AsrProviderType::Coli => "Local Offline ASR (coli)",
+        crate::asr::AsrProviderType::QwenLocal => "Local Offline ASR (Qwen3-ASR)",
     }
 }
 
@@ -1119,5 +1131,21 @@ mod tests {
 
         apply_llm_provider_selection(&mut settings, "openai");
         assert_eq!(settings.llm_provider_type, "openai");
+    }
+
+    #[test]
+    fn settings_blob_without_qwen_local_fields_still_loads() {
+        // Existing installs have an app_settings blob predating this provider;
+        // serde(default) must fill the new keys rather than fail the whole load.
+        let legacy = r#"{"asrProviderType":"volcengine","coliCommandPath":"/opt/coli"}"#;
+        let settings: AppSettings = serde_json::from_str(legacy).expect("legacy blob must load");
+
+        assert_eq!(settings.coli_command_path, "/opt/coli");
+        assert_eq!(settings.qwen_local_command_path, "");
+        assert_eq!(settings.qwen_local_model_dir, "");
+        // Language must default to Chinese, not blank: blank means auto-detect,
+        // which makes the model drift into English mid-utterance.
+        assert_eq!(settings.qwen_local_language, "Chinese");
+        assert!(settings.qwen_local_use_dictionary);
     }
 }

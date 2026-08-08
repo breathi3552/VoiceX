@@ -4,6 +4,18 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+- **Qwen3-ASR as a local offline provider** — Alibaba's open-weight model (Apache-2.0) can now be selected in Settings → ASR, driven through the external `qwen-asr` CLI. Audio never leaves the machine. Language forcing defaults to Chinese and the user dictionary is passed as a biasing prompt, since both measurably improve accuracy. Recognition is whole-utterance (text appears on hotkey release); the CLI emits no incremental output. macOS / Linux only. See the README for setup.
+- **Latency tier for OpenAI Realtime** — `gpt-live-transcribe` sessions expose OpenAI's `delay` setting (`minimal` … `xhigh`) to trade first-token latency against accuracy.
+
+### Changed
+- **OpenAI ASR moved to `gpt-transcribe` / `gpt-live-transcribe`** — the default model is now `gpt-transcribe`. The user dictionary is sent through the native `keywords` parameter instead of being appended to the prompt, and the language hint accepts a comma-separated list (e.g. `zh, en`) forwarded as `languages`. In an A/B on the same audio, the four proper nouns that the old prompt-stuffing path got wrong were all transcribed correctly. Legacy models (`gpt-4o-transcribe`, `gpt-4o-mini-transcribe`, `whisper-1`) remain selectable and keep the prompt-stuffing behaviour, which the settings copy now states explicitly.
+
+### Fixed
+- **OpenAI Realtime transcription was broken** — the client still used the Realtime beta interface, which OpenAI removed on 2026-05-12; session creation returned HTTP 404, so realtime mode could not run at all. Migrated to the GA interface: `?intent=transcription` on the WebSocket URL, session configured via `session.update` with the nested `audio.input` shape, no `OpenAI-Beta` header, and no ephemeral-token round trip. `turn_detection` is now `null`, which `gpt-live-transcribe` requires and which matches VoiceX's push-to-talk model.
+
 ## [0.12.0] - 2026-07-28
 
 ### Added

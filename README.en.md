@@ -15,7 +15,7 @@ VoiceX is a cross-platform desktop voice input tool. Its overall pipeline is: re
 ## Highlights
 
 - **Cross-platform** — runs on macOS and Windows with platform-native hotkey capture, tray icon, and text injection.
-- **Multiple ASR backends** — switch between thirteen cloud and local speech recognition providers to balance accuracy, latency, language coverage, and privacy.
+- **Multiple ASR backends** — switch between fourteen cloud and local speech recognition providers to balance accuracy, latency, language coverage, and privacy.
 - **One hotkey, multiple gestures** — a single global hotkey drives three interaction modes: tap for hands-free dictation, hold for push-to-talk, double-tap to translate.
 - **Real-time HUD overlay** — a lightweight always-on-top display shows live transcription, recording mode, countdown timer, and processing status, and on macOS it follows the active Space when triggered from another desktop.
 - **LLM-powered post-processing** — optionally send ASR output through an LLM for correction, translation, or refinement, with customizable prompt templates and dictionary-aware context.
@@ -49,13 +49,50 @@ Hold threshold and double-tap window are configurable. Press **Escape** at any t
 | Soniox Realtime | Cloud streaming (WebSocket) | `stt-rt-v4`; token-based streaming with hotword support and language hints |
 | StepAudio 2.5 ASR | Cloud batch file upload (HTTP + SSE) | StepFun; `stepaudio-2.5-asr`; uploads the full recording after capture stops, supports up to 30 minutes, and returns incremental SSE events |
 | Xiaomi MiMo ASR | Cloud batch file upload (HTTP + JSON) | Xiaomi; `mimo-v2.5-asr`; OpenAI-compatible chat/completions endpoint; uploads the full recording after capture stops, compressed to MP3 (macOS/Linux) or WAV (Windows) to fit the 10 MB input limit |
-| OpenAI ASR | Cloud batch / streaming (WebSocket) | `gpt-4o-transcribe`; dual-mode — batch file upload or realtime WebSocket streaming with VAD |
+| OpenAI ASR | Cloud batch / streaming (WebSocket) | `gpt-transcribe` / `gpt-live-transcribe`; dual-mode — batch file upload or realtime WebSocket streaming. The dictionary is sent through the native `keywords` parameter, with multi-language `languages` and a Realtime latency tier |
 | ElevenLabs Speech-to-Text | Cloud streaming / batch file upload | `scribe_v2_realtime` / `scribe_v2`; supports realtime transcription, whole-file batch uploads, and optional post-recording batch refine |
 | [Coli](https://www.npmjs.com/package/@marswave/coli) | Local offline | SenseVoice / Whisper based; installed separately via npm |
+| Qwen3-ASR (Local) | Local offline batch | Alibaba's open-weight model (Apache-2.0), fully offline; driven through the external `qwen-asr` CLI. Text appears after you release the hotkey — no incremental output yet |
 
 At the moment, Doubao, Qwen, ElevenLabs, Soniox, and Coli are the recommended options. Still, results vary from person to person: pronunciation, wording, and domain-specific vocabulary all affect the final experience.
 
 > **Note:** Cloud ASR services require API keys from their respective providers. Coli must be [installed separately](https://www.npmjs.com/package/@marswave/coli) (`npm i -g @marswave/coli`) before use.
+
+For the offline option, see [Local offline recognition (Qwen3-ASR)](#local-offline-recognition-qwen3-asr) below.
+
+### Local offline recognition (Qwen3-ASR)
+
+Runs entirely on your machine; audio never leaves the device. It is currently driven through the external `qwen-asr` CLI, which needs two setup steps.
+
+**1. Install the CLI** (requires the Rust toolchain):
+
+```bash
+cargo install qwen-asr-cli
+```
+
+This installs to `~/.cargo/bin` by default. VoiceX searches `PATH` and that directory automatically, so the command path can usually be left blank.
+
+**2. Download the model**:
+
+```bash
+qwen-asr download qwen3-asr-0.6b --output ~/models
+```
+
+The 0.6B model is about 1.9 GB. If the download breaks off partway — common for large files served through the HuggingFace CDN — a resumable transfer is more reliable:
+
+```bash
+curl -L -C - --retry 8 -o ~/models/qwen3-asr-0.6b/model.safetensors "https://huggingface.co/Qwen/Qwen3-ASR-0.6B/resolve/main/model.safetensors"
+```
+
+**3. Configure it**: pick **Qwen3-ASR (Local)** on the ASR settings page and set "Model Directory" to the path from step 2 (e.g. `~/models/qwen3-asr-0.6b`; `~` is expanded). Leave the command path blank for auto-detection.
+
+Worth knowing:
+
+- **Force Language defaults to Chinese — keep it set.** On auto-detect the model may switch to English output partway through an utterance.
+- **Dictionary biasing is on by default.** It is this model's only hotword channel (passed as a biasing prompt) and clearly helps with proper nouns. Capped at 60 entries.
+- **No incremental output yet** — text appears after you release the hotkey; short utterances typically return in under a second.
+- **macOS / Linux only.** The provider is unavailable on Windows; use a cloud service or Coli there.
+- The model has no ITN, so "one thousand two hundred thirty" is not converted to "1230".
 
 ## LLM Integration
 

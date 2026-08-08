@@ -56,11 +56,34 @@ const openaiAsrPrompt = computed({
   set: (v: string) => settingsStore.updateSetting('openaiAsrPrompt', v)
 })
 
+const openaiAsrDelay = computed({
+  get: () => settingsStore.settings.openaiAsrDelay,
+  set: (v: '' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh') =>
+    settingsStore.updateSetting('openaiAsrDelay', v)
+})
+
 const openaiModelOptions = computed(() => [
-  { label: 'GPT-4o Transcribe', value: 'gpt-4o-transcribe' },
-  { label: 'GPT-4o Mini Transcribe', value: 'gpt-4o-mini-transcribe' },
-  { label: 'Whisper-1', value: 'whisper-1' },
+  { label: 'GPT Transcribe (batch)', value: 'gpt-transcribe' },
+  { label: 'GPT Live Transcribe (realtime)', value: 'gpt-live-transcribe' },
+  { label: 'GPT-4o Transcribe (legacy)', value: 'gpt-4o-transcribe' },
+  { label: 'GPT-4o Mini Transcribe (legacy)', value: 'gpt-4o-mini-transcribe' },
+  { label: 'Whisper-1 (legacy)', value: 'whisper-1' },
 ])
+
+const openaiDelayOptions = computed(() => [
+  { label: t('asr.openaiDelayDefault'), value: '' },
+  { label: 'minimal', value: 'minimal' },
+  { label: 'low', value: 'low' },
+  { label: 'medium', value: 'medium' },
+  { label: 'high', value: 'high' },
+  { label: 'xhigh', value: 'xhigh' },
+])
+
+// `delay` only exists on the realtime transcription session, and only the
+// newer models accept it.
+const delayDisabled = computed(
+  () => openaiAsrMode.value !== 'realtime' || openaiAsrModel.value !== 'gpt-live-transcribe'
+)
 
 const openaiModeOptions = computed(() => buildOpenAiRecognitionModeOptions(t))
 const openaiPostRecordingRefineOptions = computed(() => buildOpenAiPostRecordingRefineOptions(t))
@@ -120,6 +143,19 @@ const batchRefineDisabled = computed(() => openaiAsrMode.value === 'batch')
         <NSelect
           v-model:value="openaiAsrModel"
           :options="openaiModelOptions"
+          size="small"
+          class="field-control"
+        />
+      </div>
+      <div class="field-row">
+        <div class="field-text">
+          <div class="field-label">{{ t('asr.openaiDelay') }}</div>
+          <div class="field-note">{{ t('asr.openaiDelayNote') }}</div>
+        </div>
+        <NSelect
+          v-model:value="openaiAsrDelay"
+          :options="openaiDelayOptions"
+          :disabled="delayDisabled"
           size="small"
           class="field-control"
         />

@@ -63,16 +63,35 @@ impl OpenAITranscriptionClient {
             .text("response_format", "json")
             .part("file", file_part);
 
-        if !self.config.openai_asr_language.trim().is_empty() {
-            form = form.text(
-                "language",
-                self.config.openai_asr_language.trim().to_string(),
+        let model = self.config.openai_asr_model.trim();
+        let languages = parse_language_list(&self.config.openai_asr_language);
+
+        if model_supports_keywords(model) {
+            // Modern models take structured `keywords` / `languages`; keep `prompt`
+            // for scene description only so the dictionary can't dilute it.
+            for language in &languages {
+                form = form.text("languages", language.clone());
+            }
+            for keyword in cleaned_openai_keywords(&self.config.hotwords) {
+                form = form.text("keywords", keyword);
+            }
+            let prompt = self.config.openai_asr_prompt.trim();
+            if !prompt.is_empty() {
+                form = form.text("prompt", prompt.to_string());
+            }
+        } else {
+            // Legacy models (gpt-4o-transcribe, whisper-1) only understand a single
+            // `language` and have no keyword channel, so fall back to prompt stuffing.
+            if let Some(language) = languages.first() {
+                form = form.text("language", language.clone());
+            }
+            let prompt = build_transcription_prompt(
+                self.config.openai_asr_prompt.trim(),
+                &self.config.hotwords,
             );
-        }
-        let prompt =
-            build_transcription_prompt(self.config.openai_asr_prompt.trim(), &self.config.hotwords);
-        if !prompt.is_empty() {
-            form = form.text("prompt", prompt);
+            if !prompt.is_empty() {
+                form = form.text("prompt", prompt);
+            }
         }
 
         let response = self
@@ -104,6 +123,75 @@ impl OpenAITranscriptionClient {
 
         Ok(parsed.text.trim().to_string())
     }
+}
+
+/// Upper bound on how many dictionary entries we forward as `keywords`.
+///
+/// OpenAI documents no hard limit, so this is our own guard against sending an
+/// unbounded word list on every utterance.
+const OPENAI_MAX_KEYWORDS: usize = 100;
+
+/// Models that accept the structured `keywords` / `languages` parameters.
+///
+/// The legacy `gpt-4o-transcribe*` / `whisper-1` family silently ignores them,
+/// which is why callers must branch instead of always sending the new fields.
+pub(crate) fn model_supports_keywords(model: &str) -> bool {
+    let model = model.trim();
+    model == "gpt-transcribe"
+        || model == "gpt-live-transcribe"
+        || model.starts_with("gpt-transcribe-")
+        || model.starts_with("gpt-live-transcribe-")
+}
+
+/// Split the user's language setting into an ISO 639-1 list.
+///
+/// Accepts the comma-separated form already used elsewhere in settings (e.g.
+/// `"zh, en"`), so no settings migration is needed.
+pub(crate) fn parse_language_list(raw: &str) -> Vec<String> {
+    raw.split(',')
+        .map(|part| part.trim())
+        .filter(|part| !part.is_empty())
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
+/// Normalize dictionary entries into `keywords` values.
+///
+/// OpenAI requires each keyword on one line and rejects `<`, `>`, CR and LF.
+pub(crate) fn cleaned_openai_keywords(hotwords: &[String]) -> Vec<String> {
+    let mut keywords: Vec<String> = Vec::new();
+    let mut skipped = 0usize;
+
+    for hotword in hotwords {
+        let normalized: String = hotword
+            .trim()
+            .chars()
+            .filter(|c| !matches!(c, '<' | '>' | '\r' | '\n'))
+            .collect();
+        let normalized = normalized.trim().to_string();
+
+        if normalized.is_empty() {
+            continue;
+        }
+        if keywords.contains(&normalized) {
+            continue;
+        }
+        if keywords.len() >= OPENAI_MAX_KEYWORDS {
+            skipped += 1;
+            continue;
+        }
+        keywords.push(normalized);
+    }
+
+    if skipped > 0 {
+        log::warn!(
+            "OpenAI ASR: skipped {} dictionary entries beyond the {} keyword limit",
+            skipped,
+            OPENAI_MAX_KEYWORDS
+        );
+    }
+
+    keywords
 }
 
 pub(crate) fn build_transcription_prompt(base_prompt: &str, hotwords: &[String]) -> String {
@@ -176,5 +264,49 @@ fn mime_type_for_filename(filename: &str) -> &'static str {
         "wav" => "audio/wav",
         "webm" => "audio/webm",
         _ => "application/octet-stream",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{cleaned_openai_keywords, model_supports_keywords, parse_language_list};
+
+    #[test]
+    fn keyword_support_tracks_model_family() {
+        assert!(model_supports_keywords("gpt-transcribe"));
+        assert!(model_supports_keywords("gpt-live-transcribe"));
+        assert!(model_supports_keywords("gpt-transcribe-2026-07-28"));
+        assert!(!model_supports_keywords("gpt-4o-transcribe"));
+        assert!(!model_supports_keywords("gpt-4o-mini-transcribe"));
+        assert!(!model_supports_keywords("whisper-1"));
+    }
+
+    #[test]
+    fn languages_split_on_commas() {
+        assert_eq!(parse_language_list("zh, en"), vec!["zh", "en"]);
+        assert_eq!(parse_language_list(" zh "), vec!["zh"]);
+        assert!(parse_language_list("").is_empty());
+        assert!(parse_language_list("  ,  ").is_empty());
+    }
+
+    #[test]
+    fn keywords_are_trimmed_deduped_and_stripped() {
+        let input = vec![
+            "  Tauri  ".to_string(),
+            "Tauri".to_string(),
+            "".to_string(),
+            "Vo<ice>X".to_string(),
+            "multi\nline".to_string(),
+        ];
+        assert_eq!(
+            cleaned_openai_keywords(&input),
+            vec!["Tauri", "VoiceX", "multiline"]
+        );
+    }
+
+    #[test]
+    fn keywords_respect_the_cap() {
+        let input: Vec<String> = (0..150).map(|i| format!("word{i}")).collect();
+        assert_eq!(cleaned_openai_keywords(&input).len(), super::OPENAI_MAX_KEYWORDS);
     }
 }

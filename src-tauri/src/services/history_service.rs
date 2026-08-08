@@ -324,6 +324,13 @@ impl HistoryService {
                 Self::format_provider_model("StepAudio", &config.stepaudio_model)
             }
             AsrProviderType::Mimo => Self::format_provider_model("MiMo", &config.mimo_model),
+            AsrProviderType::QwenLocal => {
+                // Record the model folder name (e.g. "qwen3-asr-0.6b") rather
+                // than the user's full path, which is machine-specific noise.
+                let dir = config.qwen_local_model_dir.trim().trim_end_matches('/');
+                let name = dir.rsplit('/').next().unwrap_or(dir);
+                Self::format_provider_model("Local / Qwen3-ASR", name)
+            }
             AsrProviderType::Coli => match config.pipeline_mode() {
                 AsrPipelineMode::Batch => Some("Local / coli / batch / sensevoice".to_string()),
                 AsrPipelineMode::RealtimeWithFinalPass => match config.coli_final_refinement_mode {

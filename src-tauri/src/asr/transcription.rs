@@ -10,7 +10,7 @@ use crate::asr::{
     ColiRefinementMode, ElevenLabsRealtimeClient, ElevenLabsRecognitionMode,
     ElevenLabsTranscriptionClient, FunAsrRealtimeClient, GeminiLiveClient,
     GeminiTranscriptionClient, GoogleSttClient, MimoTranscriptionClient, OpenAIRealtimeClient,
-    OpenAITranscriptionClient, QwenRealtimeClient, QwenRecognitionMode, QwenTranscriptionClient,
+    OpenAITranscriptionClient, QwenLocalAsrClient, QwenRealtimeClient, QwenRecognitionMode, QwenTranscriptionClient,
     SonioxClient, StepAudioTranscriptionClient,
 };
 use crate::services::history_service::HistoryService;
@@ -41,6 +41,7 @@ pub async fn transcribe_audio_path_detailed(
 ) -> Result<AsrTranscriptionOutcome, String> {
     match config.provider_type {
         AsrProviderType::Coli => run_coli_asr(path, config).await,
+        AsrProviderType::QwenLocal => run_qwen_local_asr(path, config).await,
         AsrProviderType::FunAsr => run_streaming_asr(path, config, cancel).await,
         AsrProviderType::Qwen => run_qwen_asr(path, config).await,
         AsrProviderType::Gemini => run_gemini_asr(path, config).await,
@@ -67,6 +68,24 @@ async fn run_stepaudio_asr(
     Ok(AsrTranscriptionOutcome {
         text,
         model_name: HistoryService::format_provider_model("StepAudio", &config.stepaudio_model),
+    })
+}
+
+async fn run_qwen_local_asr(
+    path: &PathBuf,
+    config: &AsrConfig,
+) -> Result<AsrTranscriptionOutcome, String> {
+    let client = QwenLocalAsrClient::new(config.clone());
+    let text = client
+        .transcribe_file(path)
+        .await
+        .map_err(|e| format!("Qwen 本地 ASR 失败: {}", e))?;
+    Ok(AsrTranscriptionOutcome {
+        text,
+        model_name: HistoryService::format_provider_model(
+            "Qwen3-ASR",
+            &config.qwen_local_model_dir,
+        ),
     })
 }
 
@@ -497,6 +516,9 @@ async fn run_streaming_asr(
         }
         AsrProviderType::Mimo => {
             unreachable!("MiMo should use file-based transcription")
+        }
+        AsrProviderType::QwenLocal => {
+            unreachable!("Qwen local ASR should use file-based transcription")
         }
         AsrProviderType::Coli => {
             unreachable!("Coli should use refine_file path")

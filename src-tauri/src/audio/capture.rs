@@ -1169,7 +1169,11 @@ fn is_debug_wav_enabled() -> bool {
         .unwrap_or(false)
 }
 
-fn write_temp_wav(
+/// Write raw PCM16 to a temporary WAV file.
+///
+/// Shared with ASR backends whose CLI only accepts WAV, since VoiceX records
+/// OGG/Opus by default.
+pub fn write_temp_wav(
     sample_rate: u32,
     channels: u16,
     pcm_bytes: &[u8],

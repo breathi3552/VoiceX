@@ -15,7 +15,7 @@ VoiceX 是一个跨平台桌面语音输入工具。整体处理链路为：录�
 ## 亮点
 
 - **跨平台** — 同时支持 macOS 和 Windows，使用平台原生热键捕获、托盘图标和文本注入。
-- **多 ASR 后端** — 在十三种云端和本地语音识别引擎间自由切换，兼顾准确率、延迟、语种覆盖和隐私。
+- **多 ASR 后端** — 在十四种云端和本地语音识别引擎间自由切换，兼顾准确率、延迟、语种覆盖和隐私。
 - **一键多用** — 单个全局热键驱动三种交互模式：轻点启动免提听写、长按进入按住说话、双击触发翻译。
 - **实时 HUD 浮层** — 轻量置顶窗口，实时显示转写文本、录音模式、倒计时和处理状态；在 macOS 多桌面场景下也会跟随当前活跃 Space 显示，不打断当前工作流。
 - **LLM 后处理** — 可选将 ASR 输出交给大模型做纠错、翻译或润色，支持自定义 prompt 模板和词典上下文注入。
@@ -49,13 +49,50 @@ VoiceX 通过一个可配置的全局热键映射三种不同意图：
 | Soniox Realtime | 云端流式 (WebSocket) | `stt-rt-v4`；基于 token 的流式识别，支持热词和语言提示 |
 | StepAudio 2.5 ASR | 云端批量文件识别 (HTTP + SSE) | 阶跃星辰；`stepaudio-2.5-asr`；录音结束后上传整段音频，支持最长 30 分钟与 SSE 增量返回 |
 | 小米 MiMo ASR | 云端批量文件识别 (HTTP + JSON) | 小米；`mimo-v2.5-asr`；OpenAI 兼容的 chat/completions 接口；录音结束后上传整段音频，压缩为 MP3（macOS/Linux）或 WAV（Windows）以满足 10 MB 输入上限 |
-| OpenAI ASR | 云端批量 / 流式 (WebSocket) | `gpt-4o-transcribe`；双模式——批量文件上传或实时 WebSocket 流式识别（含 VAD） |
+| OpenAI ASR | 云端批量 / 流式 (WebSocket) | `gpt-transcribe` / `gpt-live-transcribe`；双模式——批量文件上传或实时 WebSocket 流式识别；词典走原生 `keywords` 参数，支持多语种 `languages` 与 Realtime 延迟档位 |
 | ElevenLabs Speech-to-Text | 云端流式 / 批量文件识别 | `scribe_v2_realtime` / `scribe_v2`；支持实时识别、整段批量转录，以及录音结束后的 batch refine |
 | [Coli](https://www.npmjs.com/package/@marswave/coli) | 本地离线 | 基于 SenseVoice / Whisper，需通过 npm 单独安装 |
+| Qwen3-ASR（本地） | 本地离线批量识别 | 阿里通义开源模型（Apache-2.0），完全离线；通过外部 `qwen-asr` CLI 调用；松开热键后整段出字，暂不支持边说边出字 |
 
 目前推荐豆包、通义千问、ElevenLabs、Soniox 和 Coli，但每个人的体验可能会有差异，发音习惯、用词和使用领域都会影响最终效果。
 
 > **提示：** 云端 ASR 服务需要到对应平台申请 API Key。Coli 需要事先通过 npm 全局安装（`npm i -g @marswave/coli`），详见 [Coli 文档](https://www.npmjs.com/package/@marswave/coli)。
+
+本地离线方案见下方 [本地离线识别（Qwen3-ASR）](#本地离线识别qwen3-asr)。
+
+### 本地离线识别（Qwen3-ASR）
+
+完全在本机运行，音频不出设备。目前通过外部 `qwen-asr` 命令行工具调用，需要两步准备。
+
+**1. 安装命令行工具**（需要 Rust 工具链）：
+
+```bash
+cargo install qwen-asr-cli
+```
+
+默认安装到 `~/.cargo/bin`。VoiceX 会自动在 `PATH` 和该目录下查找，通常不需要手动填写命令路径。
+
+**2. 下载模型**：
+
+```bash
+qwen-asr download qwen3-asr-0.6b --output ~/models
+```
+
+0.6B 模型约 1.9 GB。如果下载中断（大文件经 HuggingFace CDN 时较常见），改用断点续传更可靠：
+
+```bash
+curl -L -C - --retry 8 -o ~/models/qwen3-asr-0.6b/model.safetensors "https://huggingface.co/Qwen/Qwen3-ASR-0.6B/resolve/main/model.safetensors"
+```
+
+**3. 在设置中配置**：ASR 设置页选择 **Qwen3-ASR（本地）**，把「模型目录」填成上一步的路径（如 `~/models/qwen3-asr-0.6b`，支持 `~`）。命令路径留空即可自动查找。
+
+几点说明：
+
+- **强制语种默认为中文，建议保持。** 设为「自动检测」时模型可能在句子中途整段切换成英文输出。
+- **词典增强默认开启。** 这是该模型唯一的热词通道（作为 biasing prompt 传入），对专有名词识别帮助明显，上限 60 条。
+- **暂不支持边说边出字**，松开热键后整段出字；短句通常在 1 秒内返回。
+- **仅支持 macOS / Linux。** Windows 上该 Provider 不可用，请使用云端服务或 Coli。
+- 该模型不支持 ITN，「一千两百三十」不会自动转成「1230」。
 
 ## LLM 集成
 

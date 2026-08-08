@@ -18,7 +18,7 @@ export interface AppSettings {
     uiLanguage: UiLanguage
 
     // ASR
-    asrProviderType: 'volcengine' | 'google' | 'funasr' | 'qwen' | 'gemini' | 'gemini-live' | 'cohere' | 'openai' | 'elevenlabs' | 'soniox' | 'stepaudio' | 'mimo' | 'coli'
+    asrProviderType: 'volcengine' | 'google' | 'funasr' | 'qwen' | 'gemini' | 'gemini-live' | 'cohere' | 'openai' | 'elevenlabs' | 'soniox' | 'stepaudio' | 'mimo' | 'coli' | 'qwen-local'
     asrAppKey: string
     asrAccessKey: string
     asrResourceId: string
@@ -28,6 +28,10 @@ export interface AppSettings {
     forceToSpeechTime: number | null
     enableDdc: boolean
     enableAsrContext: boolean
+    qwenLocalCommandPath: string
+    qwenLocalModelDir: string
+    qwenLocalLanguage: string
+    qwenLocalUseDictionary: boolean
     coliCommandPath: string
     coliUseVad: boolean
     coliAsrIntervalMs: number
@@ -76,6 +80,7 @@ export interface AppSettings {
     openaiAsrLanguage: string
     openaiAsrPrompt: string
     openaiAsrMode: 'batch' | 'realtime'
+    openaiAsrDelay: '' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh'
     openaiAsrPostRecordingRefine: 'off' | 'batch_refine'
 
     // ASR Provider: ElevenLabs
@@ -229,6 +234,10 @@ const defaultSettings: AppSettings = {
     forceToSpeechTime: 3500,
     enableDdc: true,
     enableAsrContext: false,
+    qwenLocalCommandPath: '',
+    qwenLocalModelDir: '',
+    qwenLocalLanguage: 'Chinese',
+    qwenLocalUseDictionary: true,
     coliCommandPath: '',
     coliUseVad: true,
     coliAsrIntervalMs: 1000,
@@ -268,11 +277,12 @@ const defaultSettings: AppSettings = {
     cohereModel: 'cohere-transcribe-03-2026',
     cohereLanguage: 'zh',
     openaiAsrApiKey: '',
-    openaiAsrModel: 'gpt-4o-transcribe',
+    openaiAsrModel: 'gpt-transcribe',
     openaiAsrBaseUrl: 'https://api.openai.com/v1',
     openaiAsrLanguage: '',
     openaiAsrPrompt: 'Transcribe faithfully with natural punctuation and capitalization. Preserve the original wording and do not omit spoken content.',
     openaiAsrMode: 'batch',
+    openaiAsrDelay: '',
     openaiAsrPostRecordingRefine: 'off',
     elevenlabsApiKey: '',
     elevenlabsRecognitionMode: 'realtime',

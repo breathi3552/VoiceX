@@ -18,6 +18,7 @@ pub enum AsrProviderType {
     StepAudio,
     Mimo,
     Coli,
+    QwenLocal,
 }
 
 impl Default for AsrProviderType {
@@ -42,6 +43,7 @@ impl AsrProviderType {
             Self::StepAudio => "StepAudio",
             Self::Mimo => "MiMo",
             Self::Coli => "coli",
+            Self::QwenLocal => "Qwen3-ASR (local)",
         }
     }
 }
@@ -202,6 +204,7 @@ pub struct AsrConfig {
     pub openai_asr_language: String,
     pub openai_asr_prompt: String,
     pub openai_asr_mode: String,
+    pub openai_asr_delay: String,
     pub openai_asr_post_recording_refine: PostRecordingBatchRefineMode,
 
     // ElevenLabs Speech-to-Text settings
@@ -230,6 +233,12 @@ pub struct AsrConfig {
     pub mimo_model: String,
     pub mimo_base_url: String,
     pub mimo_language: String,
+
+    // Local ASR via the `qwen-asr` CLI (Qwen3-ASR)
+    pub qwen_local_command_path: String,
+    pub qwen_local_model_dir: String,
+    pub qwen_local_language: String,
+    pub qwen_local_use_dictionary: bool,
 
     // Local ASR via `coli`
     pub coli_command_path: String,
@@ -304,11 +313,12 @@ impl Default for AsrConfig {
             cohere_model: "cohere-transcribe-03-2026".to_string(),
             cohere_language: "zh".to_string(),
             openai_asr_api_key: String::new(),
-            openai_asr_model: "gpt-4o-transcribe".to_string(),
+            openai_asr_model: "gpt-transcribe".to_string(),
             openai_asr_base_url: "https://api.openai.com/v1".to_string(),
             openai_asr_language: String::new(),
             openai_asr_prompt: "Transcribe faithfully with natural punctuation and capitalization. Preserve the original wording and do not omit spoken content.".to_string(),
             openai_asr_mode: "batch".to_string(),
+            openai_asr_delay: String::new(),
             openai_asr_post_recording_refine: PostRecordingBatchRefineMode::Off,
             elevenlabs_api_key: String::new(),
             elevenlabs_recognition_mode: ElevenLabsRecognitionMode::Realtime,
@@ -329,6 +339,10 @@ impl Default for AsrConfig {
             mimo_model: "mimo-v2.5-asr".to_string(),
             mimo_base_url: "https://api.xiaomimimo.com/v1".to_string(),
             mimo_language: "auto".to_string(),
+            qwen_local_command_path: String::new(),
+            qwen_local_model_dir: String::new(),
+            qwen_local_language: "Chinese".to_string(),
+            qwen_local_use_dictionary: true,
             coli_command_path: String::new(),
             coli_use_vad: true,
             coli_asr_interval_ms: 1000,
@@ -368,6 +382,7 @@ impl From<&crate::commands::settings::AppSettings> for AsrConfig {
             "stepaudio" => AsrProviderType::StepAudio,
             "mimo" => AsrProviderType::Mimo,
             "coli" => AsrProviderType::Coli,
+            "qwen-local" => AsrProviderType::QwenLocal,
             _ => AsrProviderType::Volcengine,
         };
         let mut config = Self {
@@ -410,6 +425,7 @@ impl From<&crate::commands::settings::AppSettings> for AsrConfig {
             cohere_language: settings.cohere_language.clone(),
             openai_asr_api_key: settings.openai_asr_api_key.clone(),
             openai_asr_model: settings.openai_asr_model.clone(),
+            openai_asr_delay: settings.openai_asr_delay.clone(),
             openai_asr_base_url: settings.openai_asr_base_url.clone(),
             openai_asr_language: settings.openai_asr_language.clone(),
             openai_asr_prompt: settings.openai_asr_prompt.clone(),
@@ -440,6 +456,10 @@ impl From<&crate::commands::settings::AppSettings> for AsrConfig {
             mimo_model: settings.mimo_model.clone(),
             mimo_base_url: settings.mimo_base_url.clone(),
             mimo_language: settings.mimo_language.clone(),
+            qwen_local_command_path: settings.qwen_local_command_path.clone(),
+            qwen_local_model_dir: settings.qwen_local_model_dir.clone(),
+            qwen_local_language: settings.qwen_local_language.clone(),
+            qwen_local_use_dictionary: settings.qwen_local_use_dictionary,
             coli_command_path: settings.coli_command_path.clone(),
             coli_use_vad: settings.coli_use_vad,
             coli_asr_interval_ms: settings.coli_asr_interval_ms,
@@ -580,6 +600,14 @@ impl AsrConfig {
                 supports_batch: true,
                 supports_post_recording_batch_refine: false,
             },
+            // The `qwen-asr` CLI emits only a final line, so realtime is not
+            // reachable through this transport.
+            AsrProviderType::QwenLocal => AsrProviderCapabilities {
+                supports_realtime: false,
+                supports_realtime_with_final_pass: false,
+                supports_batch: true,
+                supports_post_recording_batch_refine: false,
+            },
         }
     }
 
@@ -629,6 +657,7 @@ impl AsrConfig {
             AsrProviderType::Soniox => AsrPipelineMode::Realtime,
             AsrProviderType::StepAudio => AsrPipelineMode::Batch,
             AsrProviderType::Mimo => AsrPipelineMode::Batch,
+            AsrProviderType::QwenLocal => AsrPipelineMode::Batch,
             AsrProviderType::Coli if !self.coli_realtime => AsrPipelineMode::Batch,
             AsrProviderType::Coli
                 if self.coli_final_refinement_mode != crate::asr::ColiRefinementMode::Off =>
@@ -746,6 +775,9 @@ impl AsrConfig {
             AsrProviderType::Coli => {
                 crate::asr::resolve_coli_command(&self.coli_command_path).is_some()
             }
+            // The binary itself is resolved from PATH at call time; only the
+            // model directory has no sensible default.
+            AsrProviderType::QwenLocal => !self.qwen_local_model_dir.trim().is_empty(),
         }
     }
 }
