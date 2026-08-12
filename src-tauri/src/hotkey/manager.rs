@@ -16,6 +16,7 @@ use tauri::Emitter;
 
 use super::config::HotkeyConfiguration;
 use crate::session::{SessionCoordinator, SessionMessage};
+use crate::tts::TtsController;
 
 #[derive(Debug)]
 enum HookEvent {
@@ -23,6 +24,15 @@ enum HookEvent {
     Pressed(HotkeyConfiguration),
     Released(HotkeyConfiguration),
     EscapePressed,
+    /// Selected-text reading hotkey. Phase 0 binds this to a hardcoded
+    /// combination; phase 2 generalises the hook into an action map with
+    /// conflict detection. There is still exactly one system-level listener.
+    ReadSelectionPressed,
+    /// Escape while reading aloud. Kept separate from `EscapePressed` so the
+    /// dictation cancel path is untouched.
+    ReadSelectionEscape,
+    /// The dictation hotkey went down; reading must yield to it.
+    DictationTakesOver,
 }
 
 #[derive(Clone)]
@@ -32,6 +42,11 @@ pub struct HotkeyManager {
     active_modifiers: Arc<AtomicU32>,
     active_uses_fn: Arc<AtomicBool>,
     active_enabled: Arc<AtomicBool>,
+    read_selection_config: Arc<Mutex<Option<HotkeyConfiguration>>>,
+    read_selection_key_code: Arc<AtomicU32>,
+    read_selection_modifiers: Arc<AtomicU32>,
+    read_selection_uses_fn: Arc<AtomicBool>,
+    read_selection_enabled: Arc<AtomicBool>,
     suspension_count: Arc<AtomicU32>,
     listener_started: Arc<AtomicBool>,
     recording_sender: Arc<Mutex<Option<Sender<HotkeyConfiguration>>>>,
@@ -50,6 +65,11 @@ impl HotkeyManager {
             active_modifiers: Arc::new(AtomicU32::new(0)),
             active_uses_fn: Arc::new(AtomicBool::new(false)),
             active_enabled: Arc::new(AtomicBool::new(false)),
+            read_selection_config: Arc::new(Mutex::new(None)),
+            read_selection_key_code: Arc::new(AtomicU32::new(0)),
+            read_selection_modifiers: Arc::new(AtomicU32::new(0)),
+            read_selection_uses_fn: Arc::new(AtomicBool::new(false)),
+            read_selection_enabled: Arc::new(AtomicBool::new(false)),
             suspension_count: Arc::new(AtomicU32::new(0)),
             listener_started: Arc::new(AtomicBool::new(false)),
             recording_sender: Arc::new(Mutex::new(None)),
@@ -60,7 +80,15 @@ impl HotkeyManager {
     }
 
     /// Start the global listener once for the app lifetime.
-    pub fn start_listener(&self, app: tauri::AppHandle, session: Option<SessionCoordinator>) {
+    ///
+    /// All hotkey actions share this one listener; adding an action must never
+    /// mean adding a second system-level keyboard hook.
+    pub fn start_listener(
+        &self,
+        app: tauri::AppHandle,
+        session: Option<SessionCoordinator>,
+        tts: Option<TtsController>,
+    ) {
         if self.listener_started.swap(true, Ordering::SeqCst) {
             return;
         }
@@ -69,24 +97,31 @@ impl HotkeyManager {
         let active_modifiers = self.active_modifiers.clone();
         let active_uses_fn = self.active_uses_fn.clone();
         let active_enabled = self.active_enabled.clone();
+        let read_selection_key_code = self.read_selection_key_code.clone();
+        let read_selection_modifiers = self.read_selection_modifiers.clone();
+        let read_selection_uses_fn = self.read_selection_uses_fn.clone();
+        let read_selection_enabled = self.read_selection_enabled.clone();
         let suspension_count = self.suspension_count.clone();
         let recording_sender = self.recording_sender.clone();
         let swallow_escape = self.swallow_escape.clone();
         let session_handler = session.clone();
         let recording_active = self.recording_active.clone();
         let recording_accumulated_config = self.recording_accumulated_config.clone();
+        let tts_active = tts.as_ref().map(|controller| controller.active_handle());
 
         thread::spawn(move || {
             let modifier_state = RefCell::new(ModifierState::default());
             let last_key_for_config: RefCell<Option<Key>> = RefCell::new(None);
             let last_active_config: RefCell<Option<HotkeyConfiguration>> = RefCell::new(None);
             let active_hotkey_pressed = RefCell::new(false);
+            let read_selection_key: RefCell<Option<Key>> = RefCell::new(None);
             let (hook_tx, hook_rx) = mpsc::channel::<HookEvent>();
 
             // Worker thread to process hotkey actions off the hook callback.
             let worker_app = app.clone();
             let worker_session = session_handler.clone();
             let worker_recording = recording_sender.clone();
+            let worker_tts = tts.clone();
             thread::spawn(move || {
                 while let Ok(event) = hook_rx.recv() {
                     match event {
@@ -116,6 +151,21 @@ impl HotkeyManager {
                                 ));
                             }
                         }
+                        HookEvent::ReadSelectionPressed => {
+                            if let Some(controller) = worker_tts.as_ref() {
+                                controller.handle_read_selection_hotkey();
+                            }
+                        }
+                        HookEvent::ReadSelectionEscape => {
+                            if let Some(controller) = worker_tts.as_ref() {
+                                controller.stop(crate::tts::StopReason::Escape);
+                            }
+                        }
+                        HookEvent::DictationTakesOver => {
+                            if let Some(controller) = worker_tts.as_ref() {
+                                controller.stop_for_dictation();
+                            }
+                        }
                     }
                 }
             });
@@ -136,6 +186,20 @@ impl HotkeyManager {
                             {
                                 suppress = true;
                             }
+
+                            // Escape also cancels reading, but only while
+                            // reading is actually happening (plan §3.3) —
+                            // otherwise Escape must reach the foreground app
+                            // untouched. Read lock-free: taking a lock inside
+                            // the event tap callback risks the tap timing out.
+                            if tts_active
+                                .as_ref()
+                                .is_some_and(|flag| flag.load(Ordering::SeqCst) != 0)
+                                && suspension_count.load(Ordering::SeqCst) == 0
+                            {
+                                let _ = hook_tx.send(HookEvent::ReadSelectionEscape);
+                                suppress = true;
+                            }
                         }
                         if let Some(snapshot) = HotkeySnapshot::from_event(key, &mods) {
                             let cfg = snapshot.to_config();
@@ -154,6 +218,12 @@ impl HotkeyManager {
                                 active_uses_fn.load(Ordering::SeqCst),
                             );
 
+                            let read_selection_match = snapshot.matches_active(
+                                read_selection_key_code.load(Ordering::SeqCst),
+                                read_selection_modifiers.load(Ordering::SeqCst),
+                                read_selection_uses_fn.load(Ordering::SeqCst),
+                            );
+
                             if enabled
                                 && active_match
                                 && suspension_count.load(Ordering::SeqCst) == 0
@@ -162,7 +232,27 @@ impl HotkeyManager {
                                 *last_active_config.borrow_mut() = Some(cfg.clone());
                                 if !*active_hotkey_pressed.borrow() {
                                     *active_hotkey_pressed.borrow_mut() = true;
+                                    // Dictation takes priority over reading:
+                                    // speech playing into a live microphone
+                                    // gets transcribed back (plan §3.3).
+                                    if tts_active
+                                        .as_ref()
+                                        .is_some_and(|flag| flag.load(Ordering::SeqCst) != 0)
+                                    {
+                                        let _ = hook_tx.send(HookEvent::DictationTakesOver);
+                                    }
                                     let _ = hook_tx.send(HookEvent::Pressed(cfg));
+                                }
+                                suppress = true;
+                            } else if read_selection_enabled.load(Ordering::SeqCst)
+                                && read_selection_match
+                                && suspension_count.load(Ordering::SeqCst) == 0
+                            {
+                                // Fire once per physical press; key repeat while
+                                // held must not re-trigger the action.
+                                if read_selection_key.borrow().is_none() {
+                                    *read_selection_key.borrow_mut() = Some(key);
+                                    let _ = hook_tx.send(HookEvent::ReadSelectionPressed);
                                 }
                                 suppress = true;
                             }
@@ -198,6 +288,17 @@ impl HotkeyManager {
                                 suppress = true;
                             }
                         }
+
+                        // Swallow the matching release so the target app never
+                        // sees a stray key-up for a hotkey whose press we ate.
+                        // Cleared regardless of suspension to avoid a stuck latch.
+                        let read_selection_key_opt = *read_selection_key.borrow();
+                        if let Some(pressed_key) = read_selection_key_opt {
+                            if key == pressed_key {
+                                *read_selection_key.borrow_mut() = None;
+                                suppress = true;
+                            }
+                        }
                     }
                     _ => {}
                 }
@@ -229,11 +330,71 @@ impl HotkeyManager {
         } else {
             self.active_enabled.store(false, Ordering::SeqCst);
         }
+
+        // The dictation key can change at runtime, so re-evaluate the reading
+        // binding against it rather than only at registration time.
+        self.refresh_read_selection_binding();
     }
 
     /// Get current configuration.
     pub fn current_config(&self) -> Option<HotkeyConfiguration> {
         self.config.lock().ok().and_then(|c| c.clone())
+    }
+
+    /// Set the selected-text reading binding.
+    ///
+    /// Phase 0 only ever receives the hardcoded default; persistence and a
+    /// proper settings-time conflict UI arrive in phase 2.
+    pub fn set_read_selection_config(&self, config: Option<HotkeyConfiguration>) {
+        if let Ok(mut guard) = self.read_selection_config.lock() {
+            *guard = config;
+        }
+        self.refresh_read_selection_binding();
+    }
+
+    /// Re-apply the reading binding, disabling it when it collides with the
+    /// dictation key.
+    ///
+    /// The dictation branch is checked first in the hook, so an identical
+    /// binding would make reading unreachable with no sign of why. Refusing the
+    /// binding loudly beats swallowing the key and doing nothing.
+    fn refresh_read_selection_binding(&self) {
+        let Some(cfg) = self
+            .read_selection_config
+            .lock()
+            .ok()
+            .and_then(|guard| guard.clone())
+        else {
+            self.read_selection_enabled.store(false, Ordering::SeqCst);
+            return;
+        };
+
+        if self.conflicts_with_dictation(&cfg) {
+            log::warn!(
+                "Selected-text reading hotkey ({}) is also the dictation hotkey; \
+                 reading is disabled until one of them changes",
+                cfg.display_string()
+            );
+            self.read_selection_enabled.store(false, Ordering::SeqCst);
+            return;
+        }
+
+        self.read_selection_key_code
+            .store(cfg.key_code, Ordering::SeqCst);
+        self.read_selection_modifiers
+            .store(cfg.modifiers_bits(), Ordering::SeqCst);
+        self.read_selection_uses_fn
+            .store(cfg.uses_fn, Ordering::SeqCst);
+        self.read_selection_enabled.store(true, Ordering::SeqCst);
+    }
+
+    fn conflicts_with_dictation(&self, cfg: &HotkeyConfiguration) -> bool {
+        if !self.active_enabled.load(Ordering::SeqCst) {
+            return false;
+        }
+        cfg.key_code == self.active_key_code.load(Ordering::SeqCst)
+            && cfg.modifiers_bits() == self.active_modifiers.load(Ordering::SeqCst)
+            && cfg.uses_fn == self.active_uses_fn.load(Ordering::SeqCst)
     }
 
     /// Control whether ESC should be swallowed by the global hook.
@@ -408,6 +569,73 @@ impl HotkeySnapshot {
         key_code_from_key(self.key) == key_code
             && self.modifiers == modifiers
             && self.uses_fn == uses_fn
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn read_selection_enabled(manager: &HotkeyManager) -> bool {
+        manager.read_selection_enabled.load(Ordering::SeqCst)
+    }
+
+    #[test]
+    fn distinct_bindings_both_stay_enabled() {
+        let manager = HotkeyManager::new();
+        manager.set_config(Some(HotkeyConfiguration::default_primary()));
+        manager.set_read_selection_config(Some(HotkeyConfiguration::default_read_selection()));
+
+        assert!(read_selection_enabled(&manager));
+        assert_eq!(
+            manager.read_selection_key_code.load(Ordering::SeqCst),
+            'R' as u32
+        );
+    }
+
+    #[test]
+    fn a_binding_identical_to_dictation_is_refused() {
+        let manager = HotkeyManager::new();
+        let shared = HotkeyConfiguration::default_read_selection();
+        manager.set_config(Some(shared.clone()));
+        manager.set_read_selection_config(Some(shared));
+
+        // The dictation branch wins in the hook, so leaving this enabled would
+        // swallow the key and silently do nothing.
+        assert!(!read_selection_enabled(&manager));
+    }
+
+    #[test]
+    fn changing_dictation_onto_the_reading_key_disables_reading() {
+        let manager = HotkeyManager::new();
+        manager.set_config(Some(HotkeyConfiguration::default_primary()));
+        manager.set_read_selection_config(Some(HotkeyConfiguration::default_read_selection()));
+        assert!(read_selection_enabled(&manager));
+
+        manager.set_config(Some(HotkeyConfiguration::default_read_selection()));
+        assert!(!read_selection_enabled(&manager));
+    }
+
+    #[test]
+    fn moving_dictation_away_re_enables_reading() {
+        let manager = HotkeyManager::new();
+        manager.set_config(Some(HotkeyConfiguration::default_read_selection()));
+        manager.set_read_selection_config(Some(HotkeyConfiguration::default_read_selection()));
+        assert!(!read_selection_enabled(&manager));
+
+        manager.set_config(Some(HotkeyConfiguration::default_primary()));
+        assert!(read_selection_enabled(&manager));
+    }
+
+    #[test]
+    fn clearing_the_reading_binding_disables_it() {
+        let manager = HotkeyManager::new();
+        manager.set_config(Some(HotkeyConfiguration::default_primary()));
+        manager.set_read_selection_config(Some(HotkeyConfiguration::default_read_selection()));
+        assert!(read_selection_enabled(&manager));
+
+        manager.set_read_selection_config(None);
+        assert!(!read_selection_enabled(&manager));
     }
 }
 

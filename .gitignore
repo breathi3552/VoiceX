@@ -44,3 +44,7 @@ sync-server/logs
 
 # Local-only working notes
 .local-notes/
+
+# Python bytecode (scripts/)
+__pycache__/
+*.pyc

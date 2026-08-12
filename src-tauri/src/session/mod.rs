@@ -113,25 +113,40 @@ impl AsrAudioBridge {
 #[derive(Clone)]
 pub struct SessionCoordinator {
     sender: UnboundedSender<SessionMessage>,
+    recording: Arc<AtomicBool>,
 }
 
 impl SessionCoordinator {
     pub fn new(controller: SessionController) -> Self {
         let (tx, mut rx) = unbounded_channel::<SessionMessage>();
         controller.attach_sender(tx.clone());
+        let recording = Arc::new(AtomicBool::new(false));
+        let recording_mirror = recording.clone();
         tauri::async_runtime::spawn(async move {
             // Own the state inside the loop to avoid external locking.
             let mut state = AppState::new();
             while let Some(msg) = rx.recv().await {
                 controller.handle_message(&mut state, msg);
+                // Every transition passes through here, so this is the one
+                // place that can mirror recording status out of the actor for
+                // other subsystems (TTS mutual exclusion) to read.
+                recording_mirror.store(state.is_recording, Ordering::SeqCst);
             }
         });
 
-        Self { sender: tx }
+        Self {
+            sender: tx,
+            recording,
+        }
     }
 
     pub fn send(&self, msg: SessionMessage) {
         let _ = self.sender.send(msg);
+    }
+
+    /// Shared view of whether the microphone is currently recording.
+    pub fn recording_flag(&self) -> Arc<AtomicBool> {
+        self.recording.clone()
     }
 }
 

@@ -37,6 +37,18 @@ impl HotkeyConfiguration {
         }
     }
 
+    /// Default selected-text reading hotkey: Option+Command+R.
+    ///
+    /// Avoids the system's own "Speak selected text" shortcut (Option-Esc) so
+    /// both can coexist.
+    pub fn default_read_selection() -> Self {
+        Self {
+            key_code: 'R' as u32,
+            modifiers: 0x0800 | 0x0100, // option | cmd
+            uses_fn: false,
+        }
+    }
+
     pub fn is_fn_only(&self) -> bool {
         self.uses_fn && self.key_code == 63 && self.modifiers == 0 // kVK_Function = 63
     }

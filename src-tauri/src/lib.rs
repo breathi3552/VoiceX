@@ -11,15 +11,18 @@ pub mod hud;
 pub mod i18n;
 pub mod injector;
 pub mod llm;
+pub mod selection;
 pub mod services;
 pub mod session;
 pub mod state;
 pub mod storage;
+pub mod tts;
 pub mod ui_locale;
 
 use crate::audio::AudioService;
 use crate::commands::settings::AppSettings;
 use crate::services::{asr_debug_service::AsrDebugService, sync_service::SyncService};
+use crate::tts::TtsController;
 use hotkey::{HotkeyConfiguration, HotkeyManager};
 use session::{SessionController, SessionCoordinator};
 use tauri::Manager;
@@ -129,7 +132,18 @@ pub fn init_app(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         persisted_settings.double_tap_window_ms,
     );
     sync_service.apply_settings(&persisted_settings);
-    manager.start_listener(app.handle().clone(), Some(session_coordinator.clone()));
+
+    let tts_controller: tauri::State<'_, TtsController> = app.state();
+    tts_controller.init_with_handle(app.handle());
+    // Reading must be refused while the microphone is live, or the speech gets
+    // recorded and transcribed back (plan §3.3).
+    tts_controller.attach_recording_flag(session_coordinator.recording_flag());
+
+    manager.start_listener(
+        app.handle().clone(),
+        Some(session_coordinator.clone()),
+        Some(tts_controller.inner().clone()),
+    );
     #[cfg(target_os = "macos")]
     {
         let permission = hotkey::HotkeyPermissionStatus::detect();
@@ -156,6 +170,21 @@ pub fn init_app(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     } else {
         manager.set_config(Some(HotkeyConfiguration::default()));
     }
+
+    // Phase 0 of selected-text reading: hardcoded binding, no settings UI yet.
+    // Only where a backend exists — registering the key elsewhere would swallow
+    // the combination from the foreground app and then do nothing.
+    #[cfg(target_os = "macos")]
+    {
+        let read_selection_hotkey = HotkeyConfiguration::default_read_selection();
+        log::info!(
+            "Selected-text reading hotkey: {}",
+            read_selection_hotkey.display_string()
+        );
+        manager.set_read_selection_config(Some(read_selection_hotkey));
+    }
+    #[cfg(not(target_os = "macos"))]
+    log::info!("Selected-text reading is not available on this platform yet");
 
     log::info!("VoiceX initialized successfully");
     Ok(())
@@ -192,6 +221,7 @@ pub fn run() {
         .manage(HotkeyManager::default())
         .manage(SessionController::default())
         .manage(SyncService::default())
+        .manage(TtsController::default())
         .on_window_event(|window, event| {
             // Keep the process alive when the main window is closed; just hide it.
             if window.label() == "main" {
