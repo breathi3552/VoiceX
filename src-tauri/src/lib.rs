@@ -171,17 +171,23 @@ pub fn init_app(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         manager.set_config(Some(HotkeyConfiguration::default()));
     }
 
-    // Phase 0 of selected-text reading: hardcoded binding, no settings UI yet.
-    // Only where a backend exists — registering the key elsewhere would swallow
-    // the combination from the foreground app and then do nothing.
+    // Selected-text reading. Bound only where a backend exists — registering
+    // the key elsewhere would swallow the combination from the foreground app
+    // and then do nothing.
     #[cfg(target_os = "macos")]
-    {
-        let read_selection_hotkey = HotkeyConfiguration::default_read_selection();
+    if persisted_settings.tts_enabled {
+        let read_selection_hotkey = persisted_settings
+            .tts_hotkey_config
+            .as_deref()
+            .and_then(HotkeyConfiguration::from_storage)
+            .unwrap_or_else(HotkeyConfiguration::default_read_selection);
         log::info!(
             "Selected-text reading hotkey: {}",
             read_selection_hotkey.display_string()
         );
         manager.set_read_selection_config(Some(read_selection_hotkey));
+    } else {
+        log::info!("Selected-text reading is switched off in settings");
     }
     #[cfg(not(target_os = "macos"))]
     log::info!("Selected-text reading is not available on this platform yet");
@@ -319,6 +325,11 @@ pub fn run() {
             commands::hotkey::apply_hotkey_config,
             commands::hotkey::current_hotkey,
             commands::hotkey::hotkey_permission_status,
+            commands::tts::list_tts_voices,
+            commands::tts::preview_tts,
+            commands::tts::stop_tts,
+            commands::tts::apply_read_selection_hotkey,
+            commands::tts::read_selection_hotkey_status,
             commands::settings::get_settings,
             commands::settings::get_recent_target_apps,
             commands::settings::get_resolved_ui_locale,

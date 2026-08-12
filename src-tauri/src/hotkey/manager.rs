@@ -12,6 +12,7 @@ use std::{
 };
 
 use rdev::{Event, EventType, Key};
+use serde::Serialize;
 use tauri::Emitter;
 
 use super::config::HotkeyConfiguration;
@@ -33,6 +34,19 @@ enum HookEvent {
     ReadSelectionEscape,
     /// The dictation hotkey went down; reading must yield to it.
     DictationTakesOver,
+}
+
+/// State of the selected-text reading binding, as the settings page sees it.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReadSelectionStatus {
+    /// A binding is configured at all (the feature is switched on).
+    pub bound: bool,
+    /// The hook will actually act on it.
+    pub enabled: bool,
+    /// Bound but suppressed because it duplicates the dictation hotkey.
+    pub conflicts_with_dictation: bool,
+    pub display: Option<String>,
 }
 
 #[derive(Clone)]
@@ -341,15 +355,43 @@ impl HotkeyManager {
         self.config.lock().ok().and_then(|c| c.clone())
     }
 
-    /// Set the selected-text reading binding.
-    ///
-    /// Phase 0 only ever receives the hardcoded default; persistence and a
-    /// proper settings-time conflict UI arrive in phase 2.
+    /// Set the selected-text reading binding. `None` unbinds it, which is how
+    /// the master switch in the reading settings turns the feature off.
     pub fn set_read_selection_config(&self, config: Option<HotkeyConfiguration>) {
         if let Ok(mut guard) = self.read_selection_config.lock() {
             *guard = config;
         }
         self.refresh_read_selection_binding();
+    }
+
+    /// What actually happened to the reading binding, for the settings page.
+    ///
+    /// The binding can be off for two very different reasons — the user turned
+    /// the feature off, or it collides with the dictation key — and only the
+    /// second one needs explaining in the UI. Recomputed rather than cached so
+    /// it stays right after the dictation key changes from the other page.
+    pub fn read_selection_status(&self) -> ReadSelectionStatus {
+        let config = self
+            .read_selection_config
+            .lock()
+            .ok()
+            .and_then(|guard| guard.clone());
+
+        let Some(config) = config else {
+            return ReadSelectionStatus {
+                bound: false,
+                enabled: false,
+                conflicts_with_dictation: false,
+                display: None,
+            };
+        };
+
+        ReadSelectionStatus {
+            bound: true,
+            enabled: self.read_selection_enabled.load(Ordering::SeqCst),
+            conflicts_with_dictation: self.conflicts_with_dictation(&config),
+            display: Some(config.display_string()),
+        }
     }
 
     /// Re-apply the reading binding, disabling it when it collides with the
@@ -625,6 +667,43 @@ mod tests {
 
         manager.set_config(Some(HotkeyConfiguration::default_primary()));
         assert!(read_selection_enabled(&manager));
+    }
+
+    #[test]
+    fn the_status_tells_switched_off_apart_from_conflicting() {
+        // Both leave reading dead, but only one of them is worth explaining in
+        // the settings page — and only one is the user's own doing.
+        let manager = HotkeyManager::new();
+        manager.set_config(Some(HotkeyConfiguration::default_primary()));
+
+        manager.set_read_selection_config(None);
+        let off = manager.read_selection_status();
+        assert!(!off.bound);
+        assert!(!off.conflicts_with_dictation);
+        assert!(off.display.is_none());
+
+        manager.set_config(Some(HotkeyConfiguration::default_read_selection()));
+        manager.set_read_selection_config(Some(HotkeyConfiguration::default_read_selection()));
+        let clash = manager.read_selection_status();
+        assert!(clash.bound, "the user did configure a binding");
+        assert!(!clash.enabled, "but the hook will not act on it");
+        assert!(clash.conflicts_with_dictation);
+        assert_eq!(clash.display.as_deref(), Some("Option + Command + R"));
+    }
+
+    #[test]
+    fn moving_dictation_away_clears_the_reported_conflict() {
+        // The dictation key changes from a different settings page, so the
+        // status has to be recomputed rather than remembered.
+        let manager = HotkeyManager::new();
+        manager.set_config(Some(HotkeyConfiguration::default_read_selection()));
+        manager.set_read_selection_config(Some(HotkeyConfiguration::default_read_selection()));
+        assert!(manager.read_selection_status().conflicts_with_dictation);
+
+        manager.set_config(Some(HotkeyConfiguration::default_primary()));
+        let status = manager.read_selection_status();
+        assert!(!status.conflicts_with_dictation);
+        assert!(status.enabled);
     }
 
     #[test]

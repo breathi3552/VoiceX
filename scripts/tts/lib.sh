@@ -182,13 +182,13 @@ RESULTS_FILE=""
 
 results_init() {
   RESULTS_FILE="$1"
-  printf 'app\tresult\tpath\tsens\trole\tattr\tstatus\trange\tmarker\tms\tclipboard\tdetail\n' > "$RESULTS_FILE"
+  printf 'app\tresult\tpath\trole\tattr\tstatus\trange\tmarker\tms\tclipboard\tdetail\n' > "$RESULTS_FILE"
 }
 
 record_result() {
-  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
-    "$1" "$2" "${3:--}" "${4:--}" "${5:--}" "${6:--}" "${7:--}" \
-    "${8:--}" "${9:--}" "${10:--}" "${11:--}" "${12:--}" >> "$RESULTS_FILE"
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "$1" "$2" "${3:--}" "${4:--}" "${5:--}" "${6:--}" \
+    "${7:--}" "${8:--}" "${9:--}" "${10:--}" "${11:--}" >> "$RESULTS_FILE"
 }
 
 print_summary() {

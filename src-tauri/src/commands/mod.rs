@@ -11,3 +11,4 @@ pub mod hud;
 pub mod retranscribe;
 pub mod settings;
 pub mod sync;
+pub mod tts;

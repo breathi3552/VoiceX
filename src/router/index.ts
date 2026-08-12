@@ -43,6 +43,11 @@ const router = createRouter({
       component: () => import('../views/InputSettings.vue')
     },
     {
+      path: '/reading-settings',
+      name: 'reading-settings',
+      component: () => import('../views/ReadingSettings.vue')
+    },
+    {
       path: '/sync',
       name: 'sync',
       component: () => import('../views/SyncSettings.vue')

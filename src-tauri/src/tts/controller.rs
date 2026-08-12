@@ -13,8 +13,12 @@ use std::thread;
 
 use tauri::AppHandle;
 
-use super::{log_event, SessionSlot, StopReason, TtsBackend, TtsRequest};
+use super::{log_event, SessionSlot, StopReason, TtsBackend, TtsError, TtsRequest, TtsVoice};
 use crate::selection::{self, SelectionError, SelectionOutcome, SelectionRequest};
+
+/// Longest preview we will speak. The settings page sends a short fixed
+/// sentence; the cap only stops a malformed call from starting a long read.
+const PREVIEW_MAX_CHARS: usize = 500;
 
 #[derive(Default)]
 struct ControllerInner {
@@ -85,6 +89,60 @@ impl TtsController {
 
     pub fn is_active(&self) -> bool {
         self.inner.session.is_active()
+    }
+
+    /// Voices the active backend can speak with, for the settings page.
+    ///
+    /// Blocking, and hops to the main thread — never call from there.
+    pub fn list_voices(&self) -> Result<Vec<TtsVoice>, TtsError> {
+        self.backend()
+            .ok_or(TtsError::Unsupported)
+            .and_then(|backend| backend.list_voices())
+    }
+
+    /// Speak a fixed sample with the current voice settings.
+    ///
+    /// Deliberately skips the selection reader: the settings page needs to
+    /// audition rate, pitch and voice without a foreground app or a selection.
+    /// It shares the session slot with reading, so the read hotkey stops a
+    /// preview and a second click supersedes the first.
+    ///
+    /// Allowed even when the master switch is off — auditioning a voice before
+    /// turning the feature on is the point of the button.
+    ///
+    /// Blocking, and hops to the main thread — never call from there.
+    pub fn speak_preview(&self, text: String) -> Result<(), TtsError> {
+        if self.is_recording() {
+            return Err(TtsError::Backend("dictation is recording".to_string()));
+        }
+        let backend = self.backend().ok_or(TtsError::Unsupported)?;
+
+        let text: String = text.chars().take(PREVIEW_MAX_CHARS).collect();
+        if text.trim().is_empty() {
+            return Err(TtsError::Backend("nothing to preview".to_string()));
+        }
+
+        let token = self.inner.session.claim();
+        log_event(
+            "speak_start",
+            &[
+                ("backend", backend.name().to_string()),
+                ("chars", text.chars().count().to_string()),
+                ("origin", "preview".to_string()),
+            ],
+        );
+
+        backend
+            .start(request_from_settings(text), token)
+            .inspect_err(|err| {
+                log_event(
+                    "speak_err",
+                    &[
+                        ("error", err.code().to_string()),
+                        ("detail", err.to_string()),
+                    ],
+                );
+            })
     }
 
     /// The read-selection hotkey fired.
@@ -160,16 +218,22 @@ impl TtsController {
             return;
         };
 
+        // Read on the worker thread, not here: this runs inside the hotkey
+        // hook's worker, and the database call has no business blocking it.
         let token = self.inner.session.claim();
         thread::Builder::new()
             .name("voicex-tts-read".to_string())
             .spawn(move || {
+                let settings = load_settings();
                 log_event("selection_start", &[]);
                 let result = selection::read_selection(SelectionRequest {
                     app,
-                    // Phase 0 hardcodes compatibility mode on; phase 2 exposes
-                    // the setting. The fail-closed clipboard rules still apply.
-                    allow_clipboard_fallback: true,
+                    // Compatibility mode, off by choice in the reading settings.
+                    // The fail-closed clipboard rules apply either way.
+                    allow_clipboard_fallback: settings
+                        .as_ref()
+                        .map(|s| s.tts_clipboard_fallback)
+                        .unwrap_or(true),
                 });
 
                 // The session stays claimed across the handoff to the backend,
@@ -193,7 +257,10 @@ impl TtsController {
                                 ("chars", outcome.text.chars().count().to_string()),
                             ],
                         );
-                        let request = TtsRequest::plain(outcome.text, outcome.sensitivity);
+                        let request = match settings {
+                            Some(settings) => voice_request(&settings, outcome.text),
+                            None => TtsRequest::plain(outcome.text),
+                        };
                         if let Err(err) = backend.start(request, token) {
                             log_event(
                                 "speak_err",
@@ -216,10 +283,49 @@ impl TtsController {
     }
 }
 
+/// Persisted settings, or `None` when the store cannot be read.
+///
+/// A failure here must not stop the user from being read to, so callers fall
+/// back to engine defaults — loudly, because silently speaking in the wrong
+/// voice is the kind of thing that gets reported as "the setting does nothing".
+fn load_settings() -> Option<crate::commands::settings::AppSettings> {
+    match crate::storage::get_settings() {
+        Ok(settings) => Some(settings),
+        Err(err) => {
+            log::warn!("Falling back to default voice parameters: {err}");
+            log_event("settings_err", &[("error", err.to_string())]);
+            None
+        }
+    }
+}
+
+/// Build a request carrying the user's voice parameters.
+///
+/// Rate and volume are stored normalized (0..=1) and go straight through;
+/// pitch is stored in the engine's own 0.5..=2.0 scale. An empty voice id
+/// means "engine default", which is not the same as a voice named "".
+fn voice_request(settings: &crate::commands::settings::AppSettings, text: String) -> TtsRequest {
+    TtsRequest {
+        text,
+        voice: Some(settings.tts_voice_id.clone()).filter(|id| !id.is_empty()),
+        rate: Some(settings.tts_rate),
+        volume: Some(settings.tts_volume),
+        pitch: Some(settings.tts_pitch),
+    }
+}
+
+/// Voice parameters read fresh from the store, for callers outside the read
+/// path (the settings-page preview).
+fn request_from_settings(text: String) -> TtsRequest {
+    match load_settings() {
+        Some(settings) => voice_request(&settings, text),
+        None => TtsRequest::plain(text),
+    }
+}
+
 fn log_selection_ok(outcome: &SelectionOutcome) {
     let mut fields = vec![
         ("source", outcome.source.as_str().to_string()),
-        ("sensitivity", outcome.sensitivity.as_str().to_string()),
         ("chars", outcome.text.chars().count().to_string()),
         ("elapsed_ms", outcome.elapsed_ms.to_string()),
         (
@@ -248,6 +354,32 @@ fn log_selection_error(err: &SelectionError) {
 #[cfg(test)]
 mod tests {
     use super::super::SessionSlot;
+    use super::voice_request;
+    use crate::commands::settings::AppSettings;
+
+    #[test]
+    fn an_unset_voice_means_engine_default_not_a_voice_named_empty() {
+        let mut settings = AppSettings::default();
+        assert!(settings.tts_voice_id.is_empty());
+        assert_eq!(voice_request(&settings, "hi".to_string()).voice, None);
+
+        settings.tts_voice_id = "com.apple.voice.compact.zh-CN.Tingting".to_string();
+        assert_eq!(
+            voice_request(&settings, "hi".to_string()).voice.as_deref(),
+            Some("com.apple.voice.compact.zh-CN.Tingting")
+        );
+    }
+
+    #[test]
+    fn voice_parameters_reach_the_request_on_their_stored_scales() {
+        // Rate and volume stay normalized; pitch keeps the engine's own scale,
+        // where 1.0 is neutral rather than the midpoint of the range.
+        let settings = AppSettings::default();
+        let request = voice_request(&settings, "hi".to_string());
+        assert_eq!(request.rate, Some(0.5), "0.5 is the engine's 1x mark");
+        assert_eq!(request.volume, Some(1.0));
+        assert_eq!(request.pitch, Some(1.0));
+    }
 
     #[test]
     fn a_new_claim_cancels_the_previous_one() {

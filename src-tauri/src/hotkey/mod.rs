@@ -5,5 +5,5 @@ mod manager;
 mod permissions;
 
 pub use config::HotkeyConfiguration;
-pub use manager::HotkeyManager;
+pub use manager::{HotkeyManager, ReadSelectionStatus};
 pub use permissions::HotkeyPermissionStatus;

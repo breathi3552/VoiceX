@@ -8,7 +8,6 @@ use std::time::Instant;
 use crate::foreground_app;
 use crate::selection::{
     normalize_text, SelectionError, SelectionOutcome, SelectionRequest, SelectionSource,
-    Sensitivity,
 };
 use crate::tts::log_event;
 
@@ -27,14 +26,10 @@ pub fn read_selection(request: &SelectionRequest) -> Result<SelectionOutcome, Se
     let app_name = app_info.display_name.clone();
     let app_pid = app_info.process_id;
 
-    let finish = |text: String,
-                  source: SelectionSource,
-                  sensitivity: Sensitivity,
-                  clipboard_restored: Option<bool>| {
+    let finish = |text: String, source: SelectionSource, clipboard_restored: Option<bool>| {
         Ok(SelectionOutcome {
             text,
             source,
-            sensitivity,
             app_bundle_id: app_bundle_id.clone(),
             app_name: app_name.clone(),
             elapsed_ms: started.elapsed().as_millis() as u64,
@@ -50,30 +45,16 @@ pub fn read_selection(request: &SelectionRequest) -> Result<SelectionOutcome, Se
         return Err(SelectionError::PermissionDenied);
     }
 
-    // Secure keyboard entry is process-global: whatever has focus is a secret,
-    // and synthetic key events would be blocked anyway.
-    if ax::secure_event_input_enabled() {
-        return Err(SelectionError::SecureInput);
-    }
-
     let focused = match FocusedElement::read() {
         Ok(focused) => focused,
         Err(_api_disabled) => return Err(SelectionError::PermissionDenied),
     };
 
-    // Sensitivity defaults to Unknown: without a focused element we know nothing
-    // about the control the text came from.
-    let mut sensitivity = Sensitivity::Unknown;
     // Distinguishes "the control says nothing is selected" from "the control
     // does not answer", which decides how a silent copy is reported.
     let mut ax_reported_empty = false;
 
     if let Some(element) = focused.as_ref() {
-        if element.is_secure() {
-            return Err(SelectionError::SecureInput);
-        }
-        sensitivity = element.sensitivity();
-
         let read = element.selected_text();
 
         // Fast path first: when the Accessibility layer hands over text there is
@@ -82,7 +63,7 @@ pub fn read_selection(request: &SelectionRequest) -> Result<SelectionOutcome, Se
             let text = normalize_text(raw);
             if !text.is_empty() {
                 log_ax_probe(element, &read, None);
-                return finish(text, SelectionSource::Ax, sensitivity, None);
+                return finish(text, SelectionSource::Ax, None);
             }
         }
 
@@ -108,6 +89,15 @@ pub fn read_selection(request: &SelectionRequest) -> Result<SelectionOutcome, Se
         });
     }
 
+    // Only the copy path cares: secure keyboard entry makes the window server
+    // drop synthetic key events, so the Cmd-C below would never arrive and the
+    // read would fail as a copy timeout 300 ms later. Checking here turns that
+    // into an immediate, explainable error. Not a privacy rule — the
+    // Accessibility path above ran unconditionally (plan §3.4).
+    if ax::secure_event_input_enabled() {
+        return Err(SelectionError::SecureInput);
+    }
+
     let copied = match clipboard::read_via_copy(&request.app, app_pid) {
         Ok(copied) => copied,
         // A copy that changes nothing is indistinguishable from an empty
@@ -131,12 +121,7 @@ pub fn read_selection(request: &SelectionRequest) -> Result<SelectionOutcome, Se
         return Err(SelectionError::NoSelection);
     }
 
-    finish(
-        text,
-        SelectionSource::ClipboardCopy,
-        sensitivity,
-        Some(copied.restored),
-    )
+    finish(text, SelectionSource::ClipboardCopy, Some(copied.restored))
 }
 
 /// Record what the Accessibility layer said about the focused control.

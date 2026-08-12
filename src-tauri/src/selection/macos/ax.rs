@@ -10,8 +10,6 @@ use core_foundation::array::{CFArray, CFArrayRef};
 use core_foundation::base::{CFGetTypeID, CFRelease, CFTypeID, CFTypeRef, TCFType};
 use core_foundation::string::{CFString, CFStringRef};
 
-use crate::selection::Sensitivity;
-
 #[allow(non_camel_case_types)]
 type AXError = i32;
 
@@ -47,11 +45,19 @@ extern "C" {
 #[link(name = "Carbon", kind = "framework")]
 extern "C" {
     /// True while any process has enabled secure keyboard entry (password
-    /// fields, Terminal's "Secure Keyboard Entry", …). Synthetic key events are
-    /// blocked in that state, and the focused content is by definition secret.
+    /// fields, Terminal's "Secure Keyboard Entry", …).
     fn IsSecureEventInputEnabled() -> bool;
 }
 
+/// Whether the system is currently in secure keyboard entry.
+///
+/// This is a **capability check, not a privacy judgement** (plan §3.4): the
+/// window server drops synthetic key events in that state, so the Cmd-C of the
+/// clipboard fallback would never reach the application. It gates only the
+/// copy path, and only so the caller can fail immediately with a code that
+/// explains itself instead of sitting out the copy timeout and reporting a
+/// silent copy. It says nothing about whether the selected text is sensitive —
+/// the Accessibility path is unaffected and still reads normally.
 pub fn secure_event_input_enabled() -> bool {
     unsafe { IsSecureEventInputEnabled() }
 }
@@ -189,34 +195,6 @@ impl FocusedElement {
             role,
             subrole,
         }))
-    }
-
-    /// True when the focused control is a password/secure field. Callers must
-    /// refuse the read entirely — including the clipboard fallback.
-    pub fn is_secure(&self) -> bool {
-        matches!(self.subrole.as_deref(), Some("AXSecureTextField"))
-    }
-
-    /// `Safe` only for controls we positively recognise as plain text; anything
-    /// else is `Unknown` and stays off cloud backends.
-    ///
-    /// `AXWebArea` is deliberately **not** safe. A web area is a whole document:
-    /// its selection can span a password input, and the element-level
-    /// `AXSecureTextField` check above only sees the focused control. Treating
-    /// a page as plain text would let that reach a cloud provider.
-    pub fn sensitivity(&self) -> Sensitivity {
-        const SAFE_ROLES: [&str; 5] = [
-            "AXTextField",
-            "AXTextArea",
-            "AXStaticText",
-            "AXComboBox",
-            "AXSearchField",
-        ];
-
-        match self.role.as_deref() {
-            Some(role) if SAFE_ROLES.contains(&role) => Sensitivity::Safe,
-            _ => Sensitivity::Unknown,
-        }
     }
 
     pub fn role(&self) -> Option<&str> {

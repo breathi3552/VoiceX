@@ -40,33 +40,11 @@ impl SelectionSource {
     }
 }
 
-/// How much we know about the control the text came from.
-///
-/// `Secure` is never returned to callers — it short-circuits into
-/// [`SelectionError::SecureInput`] so no path can leak the content. `Unknown`
-/// means the Accessibility API could not identify the focused control; such
-/// text may be spoken locally but must not be sent to a cloud backend.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Sensitivity {
-    Safe,
-    Unknown,
-}
-
-impl Sensitivity {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Sensitivity::Safe => "safe",
-            Sensitivity::Unknown => "unknown",
-        }
-    }
-}
-
 /// A successful selection read.
 #[derive(Debug, Clone)]
 pub struct SelectionOutcome {
     pub text: String,
     pub source: SelectionSource,
-    pub sensitivity: Sensitivity,
     pub app_bundle_id: Option<String>,
     pub app_name: Option<String>,
     pub elapsed_ms: u64,
@@ -90,7 +68,7 @@ pub enum SelectionError {
     #[error("Accessibility permission is not granted")]
     PermissionDenied,
 
-    #[error("Refusing to read from a secure input field")]
+    #[error("Secure keyboard entry is active, so the copy fallback cannot run")]
     SecureInput,
 
     #[error("The application did not respond to the copy command in time")]

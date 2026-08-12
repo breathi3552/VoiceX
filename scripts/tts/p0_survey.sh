@@ -457,7 +457,7 @@ run_case() {
   if ! "setup_$key"; then
     invalid "$process: driver could not stage the test"
     "teardown_$key" || true
-    record_result "$process" "invalid" "" "" "" "" "" "" "" "" "" "driver-setup-failed"
+    record_result "$process" "invalid" "" "" "" "" "" "" "" "" "driver-setup-failed"
     return
   fi
 
@@ -471,7 +471,7 @@ run_case() {
   if [ "$front" != "$bundle" ]; then
     invalid "$process: not frontmost at injection time (got ${front:-none})"
     "teardown_$key" || true
-    record_result "$process" "invalid" "" "" "" "" "" "" "" "" "" "lost-foreground"
+    record_result "$process" "invalid" "" "" "" "" "" "" "" "" "lost-foreground"
     return
   fi
 
@@ -484,7 +484,7 @@ run_case() {
     fail "$process: VoiceX logged no selection result"
     log_since "$offset" | grep -E 'event=' | sed 's/^/     /' || true
     "teardown_$key" || true
-    record_result "$process" "fail" "" "" "" "" "" "" "" "" "" "no-log-response"
+    record_result "$process" "fail" "" "" "" "" "" "" "" "" "no-log-response"
     return
   fi
 
@@ -506,14 +506,13 @@ run_case() {
     local err
     err="$(echo "$window" | grep -E 'event=selection_err' | tail -1 | field error)"
     fail "$process: selection failed (${err:-unknown})"
-    record_result "$process" "fail" "none" "" "$role" "$attr" "$status" "$range" "$marker" "" "" "${err:-unknown}"
+    record_result "$process" "fail" "none" "$role" "$attr" "$status" "$range" "$marker" "" "" "${err:-unknown}"
     "teardown_$key" || true
     return
   fi
 
-  local source sens chars elapsed restored
+  local source chars elapsed restored
   source="$(echo   "$ok_line" | field source)"
-  sens="$(echo     "$ok_line" | field sensitivity)"
   chars="$(echo    "$ok_line" | field chars)"
   elapsed="$(echo  "$ok_line" | field elapsed_ms)"
   restored="$(echo "$ok_line" | field clipboard_restored)"
@@ -526,11 +525,11 @@ run_case() {
   local result detail=""
   if [ "$match" = exact ] && [ "$chars" = "$expected" ]; then
     result=pass
-    pass "$process: read the fixture exactly ($chars chars) via $source/$sens"
+    pass "$process: read the fixture exactly ($chars chars) via $source"
   elif [ "$match" = atleast ] && [ "$chars" -ge "$expected" ]; then
     result=pass
     detail="length>=$expected only"
-    pass "$process: read $chars chars (>= $expected) via $source/$sens"
+    pass "$process: read $chars chars (>= $expected) via $source"
     note "length is a lower bound here; Select All legitimately picks up more than the fixture"
   else
     result=fail
@@ -554,7 +553,7 @@ run_case() {
     detail="${detail:+$detail; }speak-failed"
   fi
 
-  record_result "$process" "$result" "$source" "$sens" "$role" "$attr" "$status" \
+  record_result "$process" "$result" "$source" "$role" "$attr" "$status" \
                 "$range" "$marker" "$elapsed" "$restored" "${detail:--}"
 
   "teardown_$key" || true
@@ -592,7 +591,7 @@ done
 
 print_summary
 echo
-note "path/sens/role/attr are the survey's actual output; result only says whether the chain ran."
+note "path/role/attr are the survey's actual output; result only says whether the chain ran."
 note "atleast rows (Preview, Terminal) assert a lower bound on length, not the exact text."
 
 if [ "$INVALID" -gt 0 ]; then

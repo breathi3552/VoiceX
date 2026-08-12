@@ -33,6 +33,7 @@ const navGroups: NavGroup[] = [
       { path: '/asr-settings', name: 'asr-settings', icon: 'mic', labelKey: 'nav.asrSettings' },
       { path: '/llm-settings', name: 'llm-settings', icon: 'brain', labelKey: 'nav.llmSettings' },
       { path: '/input-settings', name: 'input-settings', icon: 'keyboard', labelKey: 'nav.inputSettings' },
+      { path: '/reading-settings', name: 'reading-settings', icon: 'speaker', labelKey: 'nav.readingSettings' },
       { path: '/sync', name: 'sync', icon: 'sync', labelKey: 'nav.sync' },
       { path: '/post-processing', name: 'post-processing', icon: 'wand', labelKey: 'nav.postProcessing' },
     ]
@@ -102,6 +103,10 @@ function navigateTo(path: string) {
           <!-- Keyboard icon -->
           <svg v-else-if="item.icon === 'keyboard'" viewBox="0 0 24 24" fill="currentColor">
             <path d="M20 5H4c-1.1 0-1.99.9-1.99 2L2 17c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm-9 3h2v2h-2V8zm0 3h2v2h-2v-2zM8 8h2v2H8V8zm0 3h2v2H8v-2zm-1 2H5v-2h2v2zm0-3H5V8h2v2zm9 7H8v-2h8v2zm0-4h-2v-2h2v2zm0-3h-2V8h2v2zm3 3h-2v-2h2v2zm0-3h-2V8h2v2z"/>
+          </svg>
+          <!-- Speaker icon -->
+          <svg v-else-if="item.icon === 'speaker'" viewBox="0 0 24 24" fill="currentColor">
+            <path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02zM14 3.23v2.06c2.89.86 5 3.54 5 6.71s-2.11 5.85-5 6.71v2.06c4.01-.91 7-4.49 7-8.77s-2.99-7.86-7-8.77z"/>
           </svg>
           <!-- Info icon -->
           <svg v-else-if="item.icon === 'info'" viewBox="0 0 24 24" fill="currentColor">

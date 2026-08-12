@@ -151,6 +151,18 @@ export interface AppSettings {
     holdThresholdMs: number
     maxRecordingMinutes: number
 
+    // Selected-text reading (TTS)
+    ttsEnabled: boolean
+    ttsProviderType: 'system'
+    ttsVoiceId: string
+    /** Normalized 0..1. The UI shows it as a 0.5x–2x multiplier of 0.5. */
+    ttsRate: number
+    ttsVolume: number
+    /** Engine scale 0.5..2.0, where 1.0 is neutral. */
+    ttsPitch: number
+    ttsHotkeyConfig: string | null
+    ttsClipboardFallback: boolean
+
     // Input
     inputDeviceUid: string | null
     textInjectionMode: 'pasteboard' | 'typing'
@@ -337,6 +349,15 @@ const defaultSettings: AppSettings = {
     hotkeyConfig: null,
     holdThresholdMs: 1000,
     maxRecordingMinutes: 5,
+
+    ttsEnabled: true,
+    ttsProviderType: 'system',
+    ttsVoiceId: '',
+    ttsRate: 0.5,
+    ttsVolume: 1,
+    ttsPitch: 1,
+    ttsHotkeyConfig: null,
+    ttsClipboardFallback: true,
 
     inputDeviceUid: null,
     textInjectionMode: 'pasteboard',

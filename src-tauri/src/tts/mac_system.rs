@@ -170,10 +170,10 @@ impl TtsBackend for MacSystemBackend {
     fn start(&self, request: TtsRequest, token: CancelToken) -> Result<(), TtsError> {
         let TtsRequest {
             text,
-            sensitivity: _,
             voice,
             rate,
             volume,
+            pitch,
         } = request;
 
         // `run_on_main_thread` cannot be un-queued: if the wait below times out,
@@ -197,6 +197,9 @@ impl TtsBackend for MacSystemBackend {
                 }
                 if let Some(volume) = volume {
                     utterance.setVolume(volume.clamp(0.0, 1.0));
+                }
+                if let Some(pitch) = pitch {
+                    utterance.setPitchMultiplier(pitch.clamp(0.5, 2.0));
                 }
                 if let Some(identifier) = voice.as_deref() {
                     match AVSpeechSynthesisVoice::voiceWithIdentifier(&NSString::from_str(

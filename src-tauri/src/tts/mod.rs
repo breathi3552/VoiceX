@@ -14,8 +14,6 @@ use std::sync::Arc;
 
 pub use controller::TtsController;
 
-use crate::selection::Sensitivity;
-
 /// Log target for the subsystem's structured events.
 ///
 /// The automation harness under `scripts/tts/` asserts on these lines, so the
@@ -61,28 +59,29 @@ fn sanitize_field(value: &str) -> String {
 #[derive(Debug, Clone)]
 pub struct TtsRequest {
     pub text: String,
-    /// How much is known about the control the text came from. Carried on the
-    /// request because plan §3.4 makes it a backend-level rule: a cloud backend
-    /// must refuse anything that is not [`Sensitivity::Safe`]. The local system
-    /// voice is unaffected.
-    pub sensitivity: Sensitivity,
     /// Backend-specific voice identifier; `None` uses the engine default.
     pub voice: Option<String>,
     /// Normalized 0.0..=1.0 speaking rate; `None` uses the engine default.
-    /// The user-facing scale is defined in phase 3 along with the settings UI.
+    /// The user-facing scale is 0.5x–2x, converted in the settings UI.
     pub rate: Option<f32>,
     /// Normalized 0.0..=1.0 volume; `None` uses the engine default.
     pub volume: Option<f32>,
+    /// Pitch multiplier in the engine's own 0.5..=2.0 scale; `None` uses the
+    /// engine default. Unlike rate and volume this one is not normalized —
+    /// 1.0 is the neutral value and both ends are meaningful, so squashing it
+    /// into 0..1 would only hide where "unchanged" sits.
+    pub pitch: Option<f32>,
 }
 
 impl TtsRequest {
-    pub fn plain(text: String, sensitivity: Sensitivity) -> Self {
+    /// A request that leaves every voice parameter at the engine default.
+    pub fn plain(text: String) -> Self {
         Self {
             text,
-            sensitivity,
             voice: None,
             rate: None,
             volume: None,
+            pitch: None,
         }
     }
 }
@@ -194,6 +193,10 @@ pub enum StopReason {
     Hotkey,
     /// User pressed Escape while speech was active.
     Escape,
+    /// Stopped from the app's own UI — today, the settings-page preview.
+    /// Distinct from `Hotkey` so the harness assertion on `reason=hotkey`
+    /// keeps meaning "the global hotkey did it".
+    Ui,
     /// Dictation started and takes priority over reading.
     Dictation,
     /// A newer read request superseded this one.
@@ -205,6 +208,7 @@ impl StopReason {
         match self {
             StopReason::Hotkey => "hotkey",
             StopReason::Escape => "escape",
+            StopReason::Ui => "ui",
             StopReason::Dictation => "dictation",
             StopReason::Superseded => "superseded",
         }
