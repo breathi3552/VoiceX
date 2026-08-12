@@ -643,6 +643,7 @@ const enUS = {
     recording: 'Recording...',
     startRecording: 'Press the hotkey to start recording',
     readingChip: 'Reading',
+    readingChipTruncated: 'Reading · trimmed',
     reading: 'Reading aloud...',
     readingPrepare: 'Preparing to read...',
     readingNoSelection: 'Nothing is selected',

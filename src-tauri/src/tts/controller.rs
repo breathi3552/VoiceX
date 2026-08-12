@@ -15,7 +15,8 @@ use tauri::AppHandle;
 
 use super::volcengine::{self, VolcengineBackend, VolcengineConfig};
 use super::{
-    log_event, SessionSlot, StopReason, TtsBackend, TtsError, TtsRequest, TtsStatus, TtsVoice,
+    log_event, truncate_for_backend, SessionSlot, StopReason, TtsBackend, TtsError, TtsRequest,
+    TtsStatus, TtsVoice,
 };
 use crate::commands::settings::AppSettings;
 use crate::selection::{self, SelectionError, SelectionOutcome, SelectionRequest};
@@ -127,7 +128,12 @@ impl TtsController {
     /// `failure` is how the read reports a problem: the driver owns the HUD for
     /// the whole read, so letting anyone else write to it would race the hide it
     /// schedules on the way out.
-    fn spawn_hud_driver(&self, backend: Arc<dyn TtsBackend>, failure: Arc<Mutex<Option<String>>>) {
+    fn spawn_hud_driver(
+        &self,
+        backend: Arc<dyn TtsBackend>,
+        failure: Arc<Mutex<Option<String>>>,
+        truncated: Arc<Mutex<bool>>,
+    ) {
         let Some(hud) = self.hud() else { return };
         let session = self.inner.session.clone();
 
@@ -137,20 +143,23 @@ impl TtsController {
         // streaming transcripts.
         hud.show(true);
         hud.emit_error(None);
-        hud.emit_reading(Some(ReadingPhase::Preparing));
+        hud.emit_reading(Some(ReadingPhase::Preparing), false);
 
         thread::Builder::new()
             .name("voicex-tts-hud".to_string())
             .spawn(move || {
                 let mut shown = ReadingPhase::Preparing;
+                let mut shown_truncated = false;
                 while session.is_active() {
                     let phase = match backend.status() {
                         TtsStatus::Speaking => ReadingPhase::Speaking,
                         TtsStatus::Idle => ReadingPhase::Preparing,
                     };
-                    if phase != shown {
+                    let cut = truncated.lock().map(|slot| *slot).unwrap_or(false);
+                    if phase != shown || cut != shown_truncated {
                         shown = phase;
-                        hud.emit_reading(Some(phase));
+                        shown_truncated = cut;
+                        hud.emit_reading(Some(phase), cut);
                     }
                     // Only backends that render audio themselves have a level;
                     // the system voice reports none and the HUD then shows just
@@ -161,7 +170,7 @@ impl TtsController {
                     thread::sleep(HUD_POLL);
                 }
 
-                hud.emit_reading(None);
+                hud.emit_reading(None, false);
                 let reported = failure.lock().ok().and_then(|slot| slot.clone());
                 let hud_for_hide = hud.clone();
                 match reported {
@@ -406,7 +415,8 @@ impl TtsController {
         let token = self.inner.session.claim();
         self.set_active_backend(Some(backend.clone()));
         let failure: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
-        self.spawn_hud_driver(backend.clone(), failure.clone());
+        let truncated = Arc::new(Mutex::new(false));
+        self.spawn_hud_driver(backend.clone(), failure.clone(), truncated.clone());
 
         thread::Builder::new()
             .name("voicex-tts-read".to_string())
@@ -443,9 +453,30 @@ impl TtsController {
                                 ("chars", outcome.text.chars().count().to_string()),
                             ],
                         );
+                        let text = match backend.max_chars() {
+                            Some(limit) if outcome.text.chars().count() > limit => {
+                                let trimmed = truncate_for_backend(&outcome.text, limit);
+                                log_event(
+                                    "selection_truncated",
+                                    &[
+                                        ("chars", outcome.text.chars().count().to_string()),
+                                        ("limit", limit.to_string()),
+                                        ("kept", trimmed.chars().count().to_string()),
+                                    ],
+                                );
+                                // The chip says so; silently reading part of a
+                                // selection would look like the engine gave up.
+                                if let Ok(mut slot) = truncated.lock() {
+                                    *slot = true;
+                                }
+                                trimmed
+                            }
+                            _ => outcome.text,
+                        };
+
                         let request = match settings {
-                            Some(settings) => voice_request(&settings, outcome.text),
-                            None => TtsRequest::plain(outcome.text),
+                            Some(settings) => voice_request(&settings, text),
+                            None => TtsRequest::plain(text),
                         };
                         if let Err(err) = backend.start(request, token) {
                             log_event(

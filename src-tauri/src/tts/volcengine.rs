@@ -33,6 +33,16 @@ pub const DEFAULT_RESOURCE_ID: &str = "seed-tts-2.0";
 /// Terminal status code the provider sends as the last chunk.
 const CODE_FINISHED: i64 = 20000000;
 
+/// Longest text sent in one request (plan §4.5). The provider rejects
+/// oversized text with `40402003`, so the caller trims instead of spending a
+/// request to be told no.
+///
+/// No sentence-level chunking accompanies it: the plan assumed that would be
+/// needed for latency, but the interface streams — first audio arrives in
+/// 282-621 ms regardless of length (§5.4) — so splitting would add failure
+/// modes and buy nothing.
+const MAX_CHARS: usize = 5_000;
+
 /// Voices verified against Seed-TTS 2.0. The provider exposes no working
 /// speaker-list endpoint (plan §5.4), so this is a built-in allow-list; the
 /// settings page also accepts a hand-typed id for anything else the account has.
@@ -177,6 +187,10 @@ impl TtsBackend for VolcengineBackend {
             .lock()
             .ok()
             .and_then(|slot| slot.as_ref().and_then(|handle| handle.level()))
+    }
+
+    fn max_chars(&self) -> Option<usize> {
+        Some(MAX_CHARS)
     }
 }
 
@@ -576,10 +590,7 @@ mod tests {
         let mean_level = levels.iter().sum::<f32>() / levels.len().max(1) as f32;
         levels.sort_by(|a, b| a.partial_cmp(b).unwrap());
         let median = levels.get(levels.len() / 2).copied().unwrap_or(0.0);
-        let p90 = levels
-            .get(levels.len() * 9 / 10)
-            .copied()
-            .unwrap_or(0.0);
+        let p90 = levels.get(levels.len() * 9 / 10).copied().unwrap_or(0.0);
         eprintln!(
             "decoded {samples} samples ({seconds:.2} s) in {:?}",
             started.elapsed()

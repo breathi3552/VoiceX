@@ -57,6 +57,8 @@ let currentMode:
 /// while one is flowing: the macOS voice never reports a level, and bars
 /// standing still read as a broken widget rather than as silence.
 let lastLevelAt = 0;
+/// The selection was longer than the engine accepts and is only partly read.
+let readingTruncated = false;
 // Stable error code from the backend, mapped to display text at render time.
 let currentErrorCode: string | null = null;
 let currentIntent: "assistant" | "translate_en" = "assistant";
@@ -809,7 +811,9 @@ function renderIntentChip() {
   if (!intentChip) return;
 
   if (isReadingMode()) {
-    intentChip.textContent = t("readingChip");
+    intentChip.textContent = readingTruncated
+      ? t("readingChipTruncated")
+      : t("readingChip");
     intentChip.classList.remove("translate");
     return;
   }
@@ -896,7 +900,10 @@ async function initListeners() {
     handleErrorUpdate(readingErrorText() ?? event.payload?.message);
   });
 
-  await add("state:reading", (event: { payload?: { phase?: string } }) => {
+  await add(
+    "state:reading",
+    (event: { payload?: { phase?: string; truncated?: boolean } }) => {
+    readingTruncated = !!event.payload?.truncated;
     const phase = event.payload?.phase;
     if (phase === "preparing") {
       updateStatus("reading_prepare");
@@ -910,7 +917,9 @@ async function initListeners() {
       // over must not wipe the dictation state off the HUD.
       updateStatus("idle");
     }
-  });
+    renderIntentChip();
+    },
+  );
 
   await add(
     "asr:event",

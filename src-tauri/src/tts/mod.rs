@@ -241,11 +241,87 @@ pub trait TtsBackend: Send + Sync {
     fn audio_level(&self) -> Option<f32> {
         None
     }
+
+    /// Longest text this backend will accept, if it has a limit.
+    ///
+    /// `None` means unbounded, which is the case for the local voice — it costs
+    /// nothing per character and can be stopped at any moment. Cloud providers
+    /// are metered and reject oversized requests outright, so the caller
+    /// truncates rather than spending a request that comes back as an error
+    /// (plan §4.5).
+    fn max_chars(&self) -> Option<usize> {
+        None
+    }
+}
+
+/// Cut `text` down to `limit` characters, preferring a sentence boundary.
+///
+/// Truncation is going to be noticed, so it should at least land somewhere a
+/// human would pause. Falls back to the hard cut when the tail holds no
+/// boundary — a wall of text with no punctuation is exactly the case where
+/// hunting for one would throw away most of what fits.
+pub fn truncate_for_backend(text: &str, limit: usize) -> String {
+    /// How far back to look for a sentence end. Everything here counts
+    /// characters, never bytes — a byte-based window silently shrinks to a
+    /// third of its intended size on Chinese text.
+    const SENTENCE_LOOKBACK: usize = 200;
+
+    if text.chars().count() <= limit {
+        return text.to_string();
+    }
+
+    let clipped: Vec<char> = text.chars().take(limit).collect();
+    // A fixed window, not a proportion of the limit: at 5000 characters a
+    // proportional one would happily discard hundreds just to land on a full
+    // stop, which is a worse outcome than the truncation it is smoothing over.
+    let start = clipped.len().saturating_sub(SENTENCE_LOOKBACK);
+    let boundary = clipped[start..]
+        .iter()
+        .rposition(|ch| matches!(ch, '。' | '！' | '？' | '.' | '!' | '?' | '\n'))
+        .map(|offset| start + offset + 1);
+
+    match boundary {
+        Some(end) => clipped[..end].iter().collect(),
+        None => clipped.into_iter().collect(),
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn text_within_the_limit_is_left_exactly_as_it_is() {
+        assert_eq!(truncate_for_backend("你好，世界。", 100), "你好，世界。");
+        // Exactly at the limit is still within it.
+        assert_eq!(truncate_for_backend("abcde", 5), "abcde");
+    }
+
+    #[test]
+    fn truncation_prefers_a_sentence_boundary_near_the_cut() {
+        // Cutting mid-sentence is audible; ending on a full stop is not.
+        let text = "第一句话。第二句话。第三句话在这里被截断";
+        let cut = truncate_for_backend(text, 12);
+        assert_eq!(cut, "第一句话。第二句话。");
+        assert!(cut.chars().count() <= 12);
+    }
+
+    #[test]
+    fn a_wall_of_text_with_no_punctuation_is_cut_at_the_limit() {
+        // Hunting further back for a boundary would throw away most of what
+        // fits, which is worse than the truncation itself.
+        let text = "あ".repeat(50);
+        let cut = truncate_for_backend(&text, 20);
+        assert_eq!(cut.chars().count(), 20);
+    }
+
+    #[test]
+    fn the_limit_counts_characters_not_bytes() {
+        // A multibyte cap measured in bytes would cut a third of the text and,
+        // worse, could land inside a character.
+        let text = "中".repeat(10);
+        assert_eq!(truncate_for_backend(&text, 6).chars().count(), 6);
+    }
 
     #[test]
     fn field_values_stay_single_token() {

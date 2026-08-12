@@ -223,8 +223,15 @@ impl HudService {
     }
 
     /// Report the state of a selected-text read. `None` means it ended.
-    pub fn emit_reading(&self, phase: Option<ReadingPhase>) {
-        let payload = json!({ "phase": phase.map(ReadingPhase::as_str) });
+    ///
+    /// `truncated` says the selection was longer than the engine accepts and
+    /// only part of it is being read — the compact HUD has no room for a
+    /// message, so the chip carries it.
+    pub fn emit_reading(&self, phase: Option<ReadingPhase>, truncated: bool) {
+        let payload = json!({
+            "phase": phase.map(ReadingPhase::as_str),
+            "truncated": truncated,
+        });
         self.cache_event("state:reading", &payload);
         let _ = self.app_handle.emit("state:reading", payload.clone());
         let _ = self.app_handle.emit_to("hud", "state:reading", payload);
