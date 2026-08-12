@@ -12,7 +12,7 @@
 | 阶段 1 测试基建与选区验证 | 部分完成 | P0 七应用路径分布已实测（§5.1）；L2a/L2b/L2c 与门禁脚本未做。**已改为与产品化并行，不再阻塞后续阶段**；`GO` 仍是对外宣布功能可用的前提 |
 | 阶段 2 热键多动作路由工业化 | **已完成** | 冲突检测、配置化、持久化、冲突的 UI 呈现均已落地（随 §5.2 设置页一起做） |
 | 阶段 3 系统语音链路工业化 | 部分提前完成 | 取消语义、Escape、ASR/TTS 互斥、音色/语速/音量/音调参数化已落地；delegate 与 HUD 合并为一步，尚未做（§5.3） |
-| 阶段 4 云端后端 | **原型已验证** | 首发定为火山引擎 Seed-TTS 2.0，接口真实请求打通、首包 282–621 ms、中英混排单音色可用（§5.4）。播放层与后端实现未开始 |
+| 阶段 4 云端后端 | **首家已接通** | 火山引擎 Seed-TTS 2.0 全链路可用：播放层（cpal + symphonia 流式解码）、`VolcengineBackend`、设置页配置分组均已落地，**真机端到端与两条打断路径已验证**（§5.4）。情感参数暂缓 |
 | 阶段 5 打磨与发布收尾 | 未开始 | |
 
 **2026-08-12 产品方向转向**：原型阶段结束，重心转为产品化。两项重大变更——**§3.4 敏感度机制整体废除**（连带解除云端的前置决策），以及**实施顺序改为"删规则 → 设置页 → delegate+HUD → 中英分段 → 云端逐个接入"**。新会话请先读 §7，再读 §3.4、§5.2、§5.3。
@@ -220,7 +220,7 @@ macOS TCC/辅助功能授权按**进程身份**计（`AXIsProcessTrusted` 检查
 2. **默认值决策表确认**（§4.5）：不提出异议即视为按默认值执行。*阶段 0 按默认值执行，无异议。*
 3. **主观音质与延迟验收**：系统语音与云端各听一次（约 10 分钟，阶段 3/4 各一次）。
 4. **不可脚本化应用抽查**（可选，非门禁）：微信、Word 等各做一次人工选中朗读。
-5. **听写功能回归 smoke**：热键路由改造合入后人工听写一次（约 2 分钟；其余回归由 L1 路由测试覆盖）。**⚠️ 仍未执行，已跨两轮开发欠账**——改动均在 `tts_active != 0` 门控内且有单测覆盖，真机仍未验证。保持人工的理由与具体步骤见 §7 第 1 条。
+5. ~~**听写功能回归 smoke**~~ —— **✅ 2026-08-12 已完成**。跨三轮开发的欠账清掉了：期间热键路由改动过三次（TTS 第二绑定与冲突检测、启动时读持久化配置、运行时 `apply_read_selection_hotkey`、以及后端按 provider 选择）。产品在完整使用中持续验证，听写注入与取消路径均无异常。
 
 ### 4.5 默认值决策表
 
@@ -427,6 +427,13 @@ Body:    { "user": {"uid": "..."},
 1. **控制台给的实例 id 不是 resource id。** 实例 id 形如 `TTS-SeedTTS2.0<19位数字>`，直接当 `X-Api-Resource-Id` 用会返回 `45000030 requested resource not granted`。正确取值就是字符串 `seed-tts-2.0`。
 2. **Seed-TTS 2.0 有自己的音色命名空间 `*_uranus_bigtts`，与经典的 `*_moon_bigtts` / `*_mars_bigtts` 完全不通用。** 用经典音色会返回 `55000000 resource ID is mismatched with speaker related resource`——这个报错**不是**说 resource id 错了，实测 10 个经典音色全部如此，换成 `zh_female_vv_uranus_bigtts`（Vivi）立刻成功。已知可用：`zh_female_vv_uranus_bigtts`、`zh_male_liufei_uranus_bigtts`。
 3. **没找到可用的音色列表 GET 端点**（`/api/v1/tts/speakers`、`/api/v3/tts/speakers`、`/api/v3/tts/ListSpeakers` 均 404）。v1 **内置音色白名单**，不要依赖运行时拉取。
+
+**✅ 真机端到端已验证（2026-08-12）**：完整走通「选中文字 → ⌥⌘R → 火山读出」，日志事件链为 `selection_start → selection_ok source=ax → speak_start backend=volcengine → speak_started → speak_finished`，全程零 WARN / ERROR / `speak_err`。
+- **两条打断路径都正确**：热键再按一次得到 `speak_stop/speak_stopped reason=hotkey`，Escape 得到 `reason=escape`；**两次打断之后都没有多余的 `speak_finished` 或 `speak_err`**——取消契约最容易出的两种错（解码线程在停止后仍报完成、把被截断的流当错误报上来）都没有发生。
+- 长文本 138 字符从 `speak_started` 到 `speak_finished` 历时 22 秒，说明 `wait_until_drained` 跟到了真实播放结束，覆盖了独立测试（7.5 秒）没覆盖的时长。
+- **⚠️ 日志语义差异**：`speak_stopped` 在系统语音下是引擎真的确认停止（跨主线程调 `stopSpeakingAtBoundary`），在火山下只是停止标志置位、实际静音发生在下一次音频回调（约 10 ms 后）。
+
+**⚠️ 顺带推翻一条 §5.1 的推论**：本次取词的目标应用是 Claude Desktop（`com.anthropic.claudefordesktop`，Electron），`role=AXGroup`、**走 AX 直取、17–18 ms**，没有降级到 Copy。而 §5.1 里同为 Electron 的 VS Code 必须走 Copy。**因此"Electron 需要专门适配器"这个笼统结论不成立**——能否 AX 直取取决于各家应用自己的 AX 树，不是运行时决定的。VS Code 的冷启动取不到聚焦元素仍是它自己的问题。
 
 **实测性能**（音色 Vivi，mp3 24kHz 单声道）：
 
