@@ -61,7 +61,7 @@ let lastLevelAt = 0;
 let currentErrorCode: string | null = null;
 let currentIntent: "assistant" | "translate_en" = "assistant";
 let hudPresentation: "stream" | "batch" = "stream";
-let lastActiveIcon: "mic" | "waveform" | "cloud" | "wand" = "mic";
+let lastActiveIcon: keyof typeof icons = "mic";
 let partialText = "";
 let lastNonEmptyText = "";
 let currentLocale: "zh-CN" | "en-US" = "en-US";
@@ -76,6 +76,10 @@ const ELLIPSIS = "\u2026";
 const WAVEFORM_ATTACK = 0.4;
 const WAVEFORM_RELEASE = 0.15;
 const WAVEFORM_GAIN = 6.5;
+/// Display gain for reading, whose output is far hotter than a microphone's.
+/// Derived from measured output RMS rather than picked by eye — see
+/// `handleAudioLevelUpdate`.
+const READING_WAVEFORM_GAIN = 2.4;
 const WAVEFORM_HISTORY_SCROLL_SPEED = 24;
 const WAVEFORM_PROCESSING_SCROLL_SPEED = 34;
 const WAVEFORM_IDLE_FLOOR = 0.04;
@@ -187,6 +191,7 @@ const icons: Record<string, Element | null | undefined> = {
   waveform: statusIcon?.querySelector(".icon-waveform") ?? null,
   cloud: statusIcon?.querySelector(".icon-cloud") ?? null,
   wand: statusIcon?.querySelector(".icon-wand") ?? null,
+  speaking: statusIcon?.querySelector(".icon-speaking") ?? null,
 };
 
 const hudMessages = {
@@ -311,17 +316,19 @@ function updateStatus(mode: typeof currentMode) {
       statusIcon?.classList.add("animating");
       lastActiveIcon = "wand";
       break;
+    // Both reading phases share the icon; the waveform appearing is what
+    // separates them, and in compact presentation there is no text to read.
     case "reading_prepare":
       document.body.classList.add("recognizing");
-      showIcon("cloud");
+      showIcon("speaking");
       statusIcon?.classList.add("animating");
-      lastActiveIcon = "cloud";
+      lastActiveIcon = "speaking";
       break;
     case "reading_speak":
       document.body.classList.add("recording");
-      showIcon("waveform");
+      showIcon("speaking");
       statusIcon?.classList.add("animating");
-      lastActiveIcon = "waveform";
+      lastActiveIcon = "speaking";
       break;
     case "error":
       document.body.classList.add("error");
@@ -645,8 +652,15 @@ function startWaveformLoop() {
 
 function handleAudioLevelUpdate(level: number | undefined) {
   const rawLevel = clamp(level ?? 0, 0, 1);
+  // Both sources report RMS of the normalized waveform, but they sit in very
+  // different parts of the range: microphone input is quiet, synthesized output
+  // is close to full scale. Measured over a real read, its RMS runs to a median
+  // of 0.061 and a peak of 0.146 — under the microphone's gain that pins the
+  // bars at full deflection for the entire utterance, which is what this fixes.
+  // 2.4 puts the peak near the top and the median a little above half.
+  const gain = isReadingMode() ? READING_WAVEFORM_GAIN : WAVEFORM_GAIN;
   currentAudioLevel = clamp(
-    Math.sqrt(rawLevel) * WAVEFORM_GAIN + WAVEFORM_IDLE_FLOOR,
+    Math.sqrt(rawLevel) * gain + WAVEFORM_IDLE_FLOOR,
     0,
     1,
   );

@@ -542,10 +542,10 @@ mod tests {
             // Sampled while audio is actually playing, because this is what
             // drives the HUD waveform and a level that only appears after the
             // last sample would leave the bars hidden for the whole read.
-            let mut peak_level = 0.0f32;
+            let mut levels: Vec<f32> = Vec::new();
             let samples = decode_mp3_stream(source, rate, |chunk| {
                 if let Some(level) = handle.level() {
-                    peak_level = peak_level.max(level);
+                    levels.push(level);
                 }
                 playback.push(chunk)
             })
@@ -554,7 +554,7 @@ mod tests {
             playback
                 .wait_until_drained(&decode_token)
                 .expect("playback stalled");
-            (samples, peak_level)
+            (samples, levels)
         });
 
         let started = Instant::now();
@@ -570,11 +570,27 @@ mod tests {
         drop(tx);
         outcome.expect("streaming failed");
 
-        let (samples, peak_level) = decoder.join().expect("decoder panicked");
+        let (samples, mut levels) = decoder.join().expect("decoder panicked");
         let seconds = samples as f64 / rate as f64;
+        let peak_level = levels.iter().copied().fold(0.0f32, f32::max);
+        let mean_level = levels.iter().sum::<f32>() / levels.len().max(1) as f32;
+        levels.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let median = levels.get(levels.len() / 2).copied().unwrap_or(0.0);
+        let p90 = levels
+            .get(levels.len() * 9 / 10)
+            .copied()
+            .unwrap_or(0.0);
         eprintln!(
-            "decoded {samples} samples ({seconds:.2} s) in {:?}, peak level {peak_level:.3}",
+            "decoded {samples} samples ({seconds:.2} s) in {:?}",
             started.elapsed()
+        );
+        // Printed so the HUD's display gain can be calibrated against real
+        // speech instead of guessed. The bars saturate above roughly 0.024
+        // under the microphone's gain, which is why reading needs its own.
+        eprintln!(
+            "output RMS over {} readings: median {median:.4}  mean {mean_level:.4}  \
+             p90 {p90:.4}  peak {peak_level:.4}",
+            levels.len()
         );
 
         assert!(
@@ -582,8 +598,8 @@ mod tests {
             "expected several seconds of speech, decoded {seconds:.2} s"
         );
         assert!(
-            peak_level > 0.05,
-            "the HUD waveform is driven by this level, and it stayed at {peak_level:.3} \
+            peak_level > 0.01,
+            "the HUD waveform is driven by this level, and it stayed at {peak_level:.4} \
              while audio was playing"
         );
     }

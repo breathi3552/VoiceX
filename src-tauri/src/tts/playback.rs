@@ -41,8 +41,6 @@ const DRAIN_TAIL: Duration = Duration::from_millis(180);
 
 const POLL_INTERVAL: Duration = Duration::from_millis(20);
 
-/// Scales the measured amplitude into the range the HUD bars expect.
-const LEVEL_GAIN: f32 = 3.5;
 /// Weight of the newest measurement; the rest carries over from the last one.
 const LEVEL_SMOOTHING: f32 = 0.35;
 
@@ -349,13 +347,13 @@ fn fill<T, W>(
 
     let gain = f32::from_bits(shared.gain.load(Ordering::Relaxed));
     let mut written = 0u64;
-    let mut sum = 0f32;
+    let mut squares = 0f32;
 
     for frame in out.chunks_mut(channels.max(1)) {
         match local.pop_front() {
             Some(sample) => {
                 let value = sample * gain;
-                sum += value.abs();
+                squares += value * value;
                 // Mono from the provider, duplicated across the device's
                 // channels — the alternative is silence on one ear.
                 for slot in frame.iter_mut() {
@@ -370,12 +368,15 @@ fn fill<T, W>(
     shared.played.fetch_add(written, Ordering::SeqCst);
 
     if written > 0 {
-        // Mean absolute amplitude, scaled because speech rarely approaches
-        // full deflection and a literal reading would barely move the bars.
-        // Smoothed against the previous value so the waveform does not strobe.
-        let mean = (sum / written as f32 * LEVEL_GAIN).clamp(0.0, 1.0);
+        // RMS of the normalized waveform, which is exactly what the microphone
+        // path reports (`audio/capture.rs`) — one meaning for one event, so the
+        // HUD is not decoding two different units from the same field. No gain
+        // is applied here: shaping the value for display is the HUD's job, and
+        // doing it twice is how the bars ended up pinned at full deflection.
+        // Smoothed against the previous reading so the waveform does not strobe.
+        let rms = (squares / written as f32).sqrt().clamp(0.0, 1.0);
         let previous = f32::from_bits(shared.level.load(Ordering::Relaxed));
-        let smoothed = previous * (1.0 - LEVEL_SMOOTHING) + mean * LEVEL_SMOOTHING;
+        let smoothed = previous * (1.0 - LEVEL_SMOOTHING) + rms * LEVEL_SMOOTHING;
         // Never store exactly zero: that is the "nothing has played" sentinel.
         shared
             .level
