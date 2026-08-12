@@ -41,6 +41,11 @@ const DRAIN_TAIL: Duration = Duration::from_millis(180);
 
 const POLL_INTERVAL: Duration = Duration::from_millis(20);
 
+/// Scales the measured amplitude into the range the HUD bars expect.
+const LEVEL_GAIN: f32 = 3.5;
+/// Weight of the newest measurement; the rest carries over from the last one.
+const LEVEL_SMOOTHING: f32 = 0.35;
+
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum PlaybackError {
     #[error("No audio output device is available")]
@@ -123,6 +128,10 @@ struct PlaybackShared {
     /// Set by cpal's error callback; turns an otherwise silent device failure
     /// into a reported error instead of a wait that never ends.
     failed: AtomicBool,
+    /// Smoothed output level, as `f32` bits, for the HUD waveform. Measured
+    /// from the samples the callback is already walking, so it costs nothing
+    /// extra and is a real level rather than an animation pretending to be one.
+    level: AtomicU32,
 }
 
 impl PlaybackShared {
@@ -145,6 +154,12 @@ pub struct PlaybackHandle {
 }
 
 impl PlaybackHandle {
+    /// Recent output level in 0..=1, or `None` before anything has played.
+    pub fn level(&self) -> Option<f32> {
+        let bits = self.shared.level.load(Ordering::Relaxed);
+        (bits != 0).then(|| f32::from_bits(bits))
+    }
+
     pub fn stop(&self) {
         self.shared.stopped.store(true, Ordering::SeqCst);
     }
@@ -334,11 +349,13 @@ fn fill<T, W>(
 
     let gain = f32::from_bits(shared.gain.load(Ordering::Relaxed));
     let mut written = 0u64;
+    let mut sum = 0f32;
 
     for frame in out.chunks_mut(channels.max(1)) {
         match local.pop_front() {
             Some(sample) => {
                 let value = sample * gain;
+                sum += value.abs();
                 // Mono from the provider, duplicated across the device's
                 // channels — the alternative is silence on one ear.
                 for slot in frame.iter_mut() {
@@ -351,6 +368,19 @@ fn fill<T, W>(
     }
 
     shared.played.fetch_add(written, Ordering::SeqCst);
+
+    if written > 0 {
+        // Mean absolute amplitude, scaled because speech rarely approaches
+        // full deflection and a literal reading would barely move the bars.
+        // Smoothed against the previous value so the waveform does not strobe.
+        let mean = (sum / written as f32 * LEVEL_GAIN).clamp(0.0, 1.0);
+        let previous = f32::from_bits(shared.level.load(Ordering::Relaxed));
+        let smoothed = previous * (1.0 - LEVEL_SMOOTHING) + mean * LEVEL_SMOOTHING;
+        // Never store exactly zero: that is the "nothing has played" sentinel.
+        shared
+            .level
+            .store(smoothed.max(f32::MIN_POSITIVE).to_bits(), Ordering::Relaxed);
+    }
 }
 
 #[cfg(test)]
@@ -438,6 +468,41 @@ mod tests {
         let out = drain_into::<f32>(&shared, &mut local, 2, 1);
 
         assert_eq!(out, vec![0.5, -0.5]);
+    }
+
+    #[test]
+    fn the_level_is_measured_from_real_samples_not_invented() {
+        // The HUD waveform is driven by this. "Nothing has played yet" and
+        // "played, and it was silent" have to stay distinguishable, because the
+        // HUD hides the bars for the first and draws flat ones for the second.
+        let shared = Arc::new(PlaybackShared::default());
+        shared.gain.store(1.0f32.to_bits(), Ordering::Relaxed);
+        let handle = PlaybackHandle {
+            shared: shared.clone(),
+        };
+        assert_eq!(handle.level(), None, "no audio has played yet");
+
+        let mut local = VecDeque::new();
+        shared
+            .staging
+            .lock()
+            .unwrap()
+            .extend_from_slice(&[0.8, -0.8, 0.8, -0.8]);
+        drain_into::<f32>(&shared, &mut local, 4, 1);
+
+        let loud = handle.level().expect("playing must produce a level");
+        assert!(loud > 0.0);
+
+        // Silence still counts as having played, so the level exists but drops.
+        for _ in 0..12 {
+            shared.staging.lock().unwrap().extend_from_slice(&[0.0; 4]);
+            drain_into::<f32>(&shared, &mut local, 4, 1);
+        }
+        let quiet = handle.level().expect("still playing, just quietly");
+        assert!(
+            quiet < loud,
+            "silence must decay the level: {quiet} vs {loud}"
+        );
     }
 
     #[test]

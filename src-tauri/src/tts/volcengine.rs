@@ -171,6 +171,13 @@ impl TtsBackend for VolcengineBackend {
             TtsStatus::Idle
         }
     }
+
+    fn audio_level(&self) -> Option<f32> {
+        self.playback
+            .lock()
+            .ok()
+            .and_then(|slot| slot.as_ref().and_then(|handle| handle.level()))
+    }
 }
 
 impl VolcengineBackend {

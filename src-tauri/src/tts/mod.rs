@@ -232,6 +232,15 @@ pub trait TtsBackend: Send + Sync {
     fn start(&self, request: TtsRequest, token: CancelToken) -> Result<(), TtsError>;
     fn stop(&self) -> Result<(), TtsError>;
     fn status(&self) -> TtsStatus;
+
+    /// Recent output level in 0..=1, for the HUD waveform.
+    ///
+    /// `None` means this backend cannot know: the macOS system voice speaks
+    /// straight through the OS and never hands over audio (plan §5.3). The HUD
+    /// hides the waveform in that case rather than animating a made-up one.
+    fn audio_level(&self) -> Option<f32> {
+        None
+    }
 }
 
 #[cfg(test)]

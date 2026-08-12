@@ -53,6 +53,10 @@ let currentMode:
   | "reading_prepare"
   | "reading_speak"
   | "error" = "idle";
+/// When a real output level last arrived. Reading only draws the waveform
+/// while one is flowing: the macOS voice never reports a level, and bars
+/// standing still read as a broken widget rather than as silence.
+let lastLevelAt = 0;
 // Stable error code from the backend, mapped to display text at render time.
 let currentErrorCode: string | null = null;
 let currentIntent: "assistant" | "translate_en" = "assistant";
@@ -233,7 +237,15 @@ function isBatchWaveMode() {
 }
 
 function isCompactBatchMode() {
-  return hudPresentation === "batch";
+  return hudPresentation === "batch" || isReadingMode();
+}
+
+function isReadingMode() {
+  return currentMode === "reading_prepare" || currentMode === "reading_speak";
+}
+
+function hasRecentLevel() {
+  return lastLevelAt > 0 && performance.now() - lastLevelAt < 500;
 }
 
 function setBatchLayoutMode(batchWaveMode: boolean, compactBatchMode: boolean) {
@@ -244,8 +256,11 @@ function setBatchLayoutMode(batchWaveMode: boolean, compactBatchMode: boolean) {
     textArea.hidden = compactBatchMode;
   }
   if (waveformBars) {
+    const readingWithoutLevel = isReadingMode() && !hasRecentLevel();
     waveformBars.hidden =
-      !compactBatchMode || BATCH_WAVEFORM_STYLE !== "timeline";
+      !compactBatchMode ||
+      BATCH_WAVEFORM_STYLE !== "timeline" ||
+      readingWithoutLevel;
   }
   if (waveformHybridCanvas) {
     waveformHybridCanvas.hidden =
@@ -660,7 +675,7 @@ function renderTranscript() {
       currentMode === "correcting"
         ? t("processingText")
         : currentMode === "error"
-          ? readingErrorText() ?? t("error")
+          ? t("error")
         : currentMode === "recognizing"
           ? t("recognizing")
           : currentMode === "reading_prepare"
@@ -830,7 +845,9 @@ async function initListeners() {
 
   await add("state:error", (event: { payload?: { message?: string } }) => {
     currentErrorCode = event.payload?.message ?? null;
-    handleErrorUpdate(event.payload?.message);
+    // Reading reports a stable code; dictation reports a human message. Map
+    // what we recognise and pass anything else through untouched.
+    handleErrorUpdate(readingErrorText() ?? event.payload?.message);
   });
 
   await add("state:reading", (event: { payload?: { phase?: string } }) => {
@@ -862,6 +879,7 @@ async function initListeners() {
   });
 
   await add("state:audio_level", (event: { payload?: { level?: number } }) => {
+    lastLevelAt = performance.now();
     handleAudioLevelUpdate(event.payload?.level);
   });
 

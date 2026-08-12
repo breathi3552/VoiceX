@@ -132,7 +132,10 @@ impl TtsController {
         let session = self.inner.session.clone();
 
         hud.cancel_hide();
-        hud.show(false);
+        // Compact presentation: a read has nothing to display but its own
+        // existence, so it gets the small HUD rather than the one sized for
+        // streaming transcripts.
+        hud.show(true);
         hud.emit_error(None);
         hud.emit_reading(Some(ReadingPhase::Preparing));
 
@@ -148,6 +151,12 @@ impl TtsController {
                     if phase != shown {
                         shown = phase;
                         hud.emit_reading(Some(phase));
+                    }
+                    // Only backends that render audio themselves have a level;
+                    // the system voice reports none and the HUD then shows just
+                    // the animated icon instead of a waveform standing still.
+                    if let Some(level) = backend.audio_level() {
+                        hud.emit_audio_level(level);
                     }
                     thread::sleep(HUD_POLL);
                 }
