@@ -18,11 +18,18 @@ pub struct TtsVoiceOption {
     pub language: String,
 }
 
-/// Voices the active backend offers, for the voice picker.
+/// Voices a backend offers, for the voice picker.
+///
+/// `provider` is explicit because the settings page asks right after the user
+/// picks one, before the debounced save has written it — resolving it from the
+/// store would answer about the previous provider and list its voices instead.
 #[tauri::command]
-pub async fn list_tts_voices(tts: State<'_, TtsController>) -> Result<Vec<TtsVoiceOption>, String> {
+pub async fn list_tts_voices(
+    tts: State<'_, TtsController>,
+    provider: Option<String>,
+) -> Result<Vec<TtsVoiceOption>, String> {
     let controller = tts.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || controller.list_voices())
+    tauri::async_runtime::spawn_blocking(move || controller.list_voices(provider.as_deref()))
         .await
         .map_err(|err| format!("Failed to list voices: {err}"))?
         .map(|voices| {

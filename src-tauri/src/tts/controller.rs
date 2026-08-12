@@ -95,14 +95,21 @@ impl TtsController {
         self.inner.app.lock().ok().and_then(|slot| slot.clone())
     }
 
-    /// Resolve the backend the settings ask for, applying its credentials.
+    /// Resolve a backend by provider name, applying its credentials.
+    ///
+    /// `provider` is passed in rather than read from `settings` because the
+    /// settings page asks about a provider the user just picked, which the
+    /// debounced save has not written yet. Reading it from the store there
+    /// would answer about the *previous* provider.
     ///
     /// Falls back to the system voice when the cloud provider is selected but
     /// unavailable, rather than refusing to speak — but says so in the log, so
     /// "why does it sound like the local voice" has an answer.
-    fn backend_for(&self, settings: Option<&AppSettings>) -> Option<Arc<dyn TtsBackend>> {
-        let provider = settings.map(|s| s.tts_provider_type.as_str()).unwrap_or("");
-
+    fn backend_for(
+        &self,
+        provider: &str,
+        settings: Option<&AppSettings>,
+    ) -> Option<Arc<dyn TtsBackend>> {
         if provider == PROVIDER_VOLCENGINE {
             let cloud = self
                 .inner
@@ -147,12 +154,15 @@ impl TtsController {
         self.inner.session.is_active()
     }
 
-    /// Voices the active backend can speak with, for the settings page.
+    /// Voices offered by `provider`, or by the configured one when `None`.
     ///
     /// Blocking, and hops to the main thread — never call from there.
-    pub fn list_voices(&self) -> Result<Vec<TtsVoice>, TtsError> {
+    pub fn list_voices(&self, provider: Option<&str>) -> Result<Vec<TtsVoice>, TtsError> {
         let settings = load_settings();
-        self.backend_for(settings.as_ref())
+        let provider = provider
+            .or_else(|| settings.as_ref().map(|s| s.tts_provider_type.as_str()))
+            .unwrap_or_default();
+        self.backend_for(provider, settings.as_ref())
             .ok_or(TtsError::Unsupported)
             .and_then(|backend| backend.list_voices())
     }
@@ -173,8 +183,12 @@ impl TtsController {
             return Err(TtsError::Backend("dictation is recording".to_string()));
         }
         let settings = load_settings();
+        let provider = settings
+            .as_ref()
+            .map(|s| s.tts_provider_type.clone())
+            .unwrap_or_default();
         let backend = self
-            .backend_for(settings.as_ref())
+            .backend_for(&provider, settings.as_ref())
             .ok_or(TtsError::Unsupported)?;
 
         let text: String = text.chars().take(PREVIEW_MAX_CHARS).collect();
@@ -281,7 +295,11 @@ impl TtsController {
         // the session is claimed. This runs on the hotkey hook's worker, and a
         // database read is cheap enough not to matter there.
         let settings = load_settings();
-        let Some(backend) = self.backend_for(settings.as_ref()) else {
+        let provider = settings
+            .as_ref()
+            .map(|s| s.tts_provider_type.clone())
+            .unwrap_or_default();
+        let Some(backend) = self.backend_for(&provider, settings.as_ref()) else {
             log_event("speak_err", &[("error", "unsupported".to_string())]);
             return;
         };

@@ -58,7 +58,7 @@ const ttsProviderType = computed({
   set: (value: ProviderValue) => {
     settingsStore.updateSetting('ttsProviderType', value)
     // The voice list is per provider and shares nothing across them.
-    void loadVoices()
+    void loadVoices(value)
   }
 })
 
@@ -166,12 +166,20 @@ async function resetHotkey() {
   await applyHotkey()
 }
 
-async function loadVoices() {
+async function loadVoices(provider: ProviderValue = settingsStore.settings.ttsProviderType) {
   // The cloud provider is network-only, so its voice list works everywhere;
   // only the system voice needs macOS.
-  if (!isMacOS && !isVolcengine.value) return
+  if (!isMacOS && provider !== 'volcengine') {
+    voices.value = []
+    return
+  }
+  // Clear first: a slow reply must not leave the previous provider's voices on
+  // screen, which is how system voices used to show up under the cloud engine.
+  voices.value = []
   try {
-    voices.value = await invoke<TtsVoiceOption[]>('list_tts_voices')
+    // Passed explicitly — the store's save is debounced, so the backend would
+    // still read the previous provider from the database.
+    voices.value = await invoke<TtsVoiceOption[]>('list_tts_voices', { provider })
     voicesError.value = ''
   } catch (error) {
     voices.value = []
