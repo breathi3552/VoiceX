@@ -6,8 +6,11 @@
 //! same trait.
 
 pub mod controller;
+pub mod decode;
 #[cfg(target_os = "macos")]
 pub mod mac_system;
+pub mod playback;
+pub mod volcengine;
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;

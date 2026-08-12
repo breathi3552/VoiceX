@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
-import { NButton, NSelect, NSlider, NSwitch } from 'naive-ui'
+import { NButton, NInput, NSelect, NSlider, NSwitch } from 'naive-ui'
 import { useI18n } from 'vue-i18n'
 import { useSettingsStore } from '../stores/settings'
 import { formatHotkey } from '../utils/hotkey'
@@ -46,26 +46,56 @@ const ttsEnabled = computed({
   }
 })
 
+type ProviderValue = 'system' | 'volcengine'
+
 const providerOptions = computed(() => [
-  { label: t('reading.providerSystem'), value: 'system' }
+  { label: t('reading.providerSystem'), value: 'system' },
+  { label: t('reading.providerVolcengine'), value: 'volcengine' }
 ])
 
 const ttsProviderType = computed({
   get: () => settingsStore.settings.ttsProviderType,
-  set: (value: 'system') => settingsStore.updateSetting('ttsProviderType', value)
+  set: (value: ProviderValue) => {
+    settingsStore.updateSetting('ttsProviderType', value)
+    // The voice list is per provider and shares nothing across them.
+    void loadVoices()
+  }
 })
 
-const voiceOptions = computed(() => [
-  { label: t('reading.voiceDefault'), value: '' },
-  ...voices.value.map((voice) => ({
+const isVolcengine = computed(() => settingsStore.settings.ttsProviderType === 'volcengine')
+
+const voiceOptions = computed(() => {
+  const listed = voices.value.map((voice) => ({
     label: `${voice.name} · ${voice.language}`,
     value: voice.id
   }))
-])
+  // The cloud provider has no default-voice concept, and an empty speaker is
+  // not a valid request — so only the local engine gets that entry.
+  return isVolcengine.value
+    ? listed
+    : [{ label: t('reading.voiceDefault'), value: '' }, ...listed]
+})
 
+// Voice identifiers do not carry across providers, so each keeps its own.
 const ttsVoiceId = computed({
-  get: () => settingsStore.settings.ttsVoiceId,
-  set: (value: string) => settingsStore.updateSetting('ttsVoiceId', value)
+  get: () =>
+    isVolcengine.value
+      ? settingsStore.settings.volcTtsSpeaker
+      : settingsStore.settings.ttsVoiceId,
+  set: (value: string) =>
+    isVolcengine.value
+      ? settingsStore.updateSetting('volcTtsSpeaker', value)
+      : settingsStore.updateSetting('ttsVoiceId', value)
+})
+
+const volcTtsApiKey = computed({
+  get: () => settingsStore.settings.volcTtsApiKey,
+  set: (value: string) => settingsStore.updateSetting('volcTtsApiKey', value)
+})
+
+const volcTtsResourceId = computed({
+  get: () => settingsStore.settings.volcTtsResourceId,
+  set: (value: string) => settingsStore.updateSetting('volcTtsResourceId', value)
 })
 
 // The stored rate is normalized 0..1 around the engine default; the slider
@@ -137,7 +167,9 @@ async function resetHotkey() {
 }
 
 async function loadVoices() {
-  if (!isMacOS) return
+  // The cloud provider is network-only, so its voice list works everywhere;
+  // only the system voice needs macOS.
+  if (!isMacOS && !isVolcengine.value) return
   try {
     voices.value = await invoke<TtsVoiceOption[]>('list_tts_voices')
     voicesError.value = ''
@@ -209,6 +241,35 @@ onMounted(async () => {
             class="field-control"
           />
         </div>
+
+        <template v-if="isVolcengine">
+          <div class="field-row">
+            <div class="field-text">
+              <div class="field-label">{{ t('reading.volcApiKey') }}</div>
+              <div class="field-note">{{ t('reading.volcApiKeyNote') }}</div>
+            </div>
+            <NInput
+              v-model:value="volcTtsApiKey"
+              type="password"
+              show-password-on="click"
+              size="small"
+              class="field-control"
+              :placeholder="t('reading.volcApiKeyPlaceholder')"
+            />
+          </div>
+          <div class="field-row">
+            <div class="field-text">
+              <div class="field-label">{{ t('reading.volcResourceId') }}</div>
+              <div class="field-note">{{ t('reading.volcResourceIdNote') }}</div>
+            </div>
+            <NInput
+              v-model:value="volcTtsResourceId"
+              size="small"
+              class="field-control"
+              placeholder="seed-tts-2.0"
+            />
+          </div>
+        </template>
       </div>
     </div>
 
@@ -272,12 +333,15 @@ onMounted(async () => {
         <div class="field-row">
           <div class="field-text">
             <div class="field-label">{{ t('reading.voiceLabel') }}</div>
-            <div class="field-note">{{ t('reading.voiceNote') }}</div>
+            <div class="field-note">
+              {{ isVolcengine ? t('reading.volcSpeakerNote') : t('reading.voiceNote') }}
+            </div>
           </div>
           <NSelect
             v-model:value="ttsVoiceId"
             :options="voiceOptions"
-            :disabled="!isMacOS"
+            :disabled="!isMacOS && !isVolcengine"
+            :tag="isVolcengine"
             filterable
             size="small"
             class="field-control"
@@ -305,7 +369,9 @@ onMounted(async () => {
           </div>
         </div>
 
-        <div class="field-row">
+        <!-- Volcengine's audio_params carry no pitch, so the row would be a
+             control that quietly does nothing. -->
+        <div v-if="!isVolcengine" class="field-row">
           <div class="field-text">
             <div class="field-label">{{ t('reading.pitch') }}</div>
           </div>

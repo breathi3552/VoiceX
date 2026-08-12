@@ -167,7 +167,7 @@ pub struct AppSettings {
 
     // Selected-text reading (TTS)
     pub tts_enabled: bool,
-    pub tts_provider_type: String, // "system"
+    pub tts_provider_type: String, // "system" | "volcengine"
     /// Backend voice identifier; empty means "whatever the engine picks".
     pub tts_voice_id: String,
     /// Normalized 0.0..=1.0 speaking rate. The UI shows a 0.5x–2x multiplier
@@ -182,6 +182,14 @@ pub struct AppSettings {
     /// Accessibility path comes up empty. Turning it off loses Safari and
     /// VS Code (plan §5.1); every other P0 application reads via AX.
     pub tts_clipboard_fallback: bool,
+
+    // TTS Provider: Volcengine (Doubao Seed-TTS 2.0)
+    /// Separate from the ASR credentials — the speech synthesis models issue
+    /// their own API key from the Ark console.
+    pub volc_tts_api_key: String,
+    /// The model string, not the console's instance id (plan §5.4).
+    pub volc_tts_resource_id: String,
+    pub volc_tts_speaker: String,
 
     // Input
     pub input_device_uid: Option<String>,
@@ -389,6 +397,10 @@ impl Default for AppSettings {
             tts_pitch: 1.0,
             tts_hotkey_config: None,
             tts_clipboard_fallback: true,
+
+            volc_tts_api_key: String::new(),
+            volc_tts_resource_id: crate::tts::volcengine::DEFAULT_RESOURCE_ID.to_string(),
+            volc_tts_speaker: crate::tts::volcengine::default_speaker().to_string(),
 
             input_device_uid: None,
             text_injection_mode: "pasteboard".to_string(),

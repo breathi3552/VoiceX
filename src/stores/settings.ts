@@ -153,7 +153,7 @@ export interface AppSettings {
 
     // Selected-text reading (TTS)
     ttsEnabled: boolean
-    ttsProviderType: 'system'
+    ttsProviderType: 'system' | 'volcengine'
     ttsVoiceId: string
     /** Normalized 0..1. The UI shows it as a 0.5x–2x multiplier of 0.5. */
     ttsRate: number
@@ -162,6 +162,12 @@ export interface AppSettings {
     ttsPitch: number
     ttsHotkeyConfig: string | null
     ttsClipboardFallback: boolean
+
+    // TTS Provider: Volcengine (Doubao Seed-TTS 2.0)
+    volcTtsApiKey: string
+    /** The model string, not the console's instance id. */
+    volcTtsResourceId: string
+    volcTtsSpeaker: string
 
     // Input
     inputDeviceUid: string | null
@@ -358,6 +364,10 @@ const defaultSettings: AppSettings = {
     ttsPitch: 1,
     ttsHotkeyConfig: null,
     ttsClipboardFallback: true,
+
+    volcTtsApiKey: '',
+    volcTtsResourceId: 'seed-tts-2.0',
+    volcTtsSpeaker: 'zh_female_vv_uranus_bigtts',
 
     inputDeviceUid: null,
     textInjectionMode: 'pasteboard',

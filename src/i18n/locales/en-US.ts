@@ -189,6 +189,13 @@ const enUS = {
     advancedSub: 'You should rarely need these',
     clipboardFallback: 'Compatibility mode',
     clipboardFallbackNote: 'When Accessibility cannot read the selection, synthesize Command + C and restore the clipboard afterwards. Turning this off loses Safari and VS Code; every other app is unaffected.',
+    providerVolcengine: 'Volcengine (Doubao Seed-TTS 2.0)',
+    volcApiKey: 'API key',
+    volcApiKeyNote: 'From the speech synthesis page of the Volcengine Ark console. Not the same key as ASR uses.',
+    volcApiKeyPlaceholder: 'Paste the API key',
+    volcResourceId: 'Resource ID',
+    volcResourceIdNote: 'The model string (seed-tts-2.0 by default), not the console\'s instance id — an instance id is rejected.',
+    volcSpeakerNote: 'Seed-TTS 2.0 has its own voices; classic Doubao voices do not work here. Type any other voice id and press Enter, then check it with Preview.',
     unsupportedPlatform: 'Read selection is not available on this platform yet.'
   },
   sync: {

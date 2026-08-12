@@ -189,6 +189,13 @@ const zhCN = {
     advancedSub: '一般不需要改',
     clipboardFallback: '兼容模式',
     clipboardFallbackNote: '辅助功能取不到选中文字时，改用模拟 Command + C 复制并随后还原剪贴板。关闭后 Safari 与 VS Code 将无法朗读，其余应用不受影响。',
+    providerVolcengine: '火山引擎（豆包 Seed-TTS 2.0）',
+    volcApiKey: 'API Key',
+    volcApiKeyNote: '在火山方舟控制台的语音合成大模型页面获取。与 ASR 的密钥不是同一份。',
+    volcApiKeyPlaceholder: '粘贴 API Key',
+    volcResourceId: '资源 ID',
+    volcResourceIdNote: '填模型字符串（默认 seed-tts-2.0），不是控制台里的实例 ID——填实例 ID 会被拒绝。',
+    volcSpeakerNote: 'Seed-TTS 2.0 专属音色，与经典音色不通用。列表里没有的可直接输入音色 ID 后回车，再用试听验证。',
     unsupportedPlatform: '当前平台暂不支持选中朗读。'
   },
   sync: {

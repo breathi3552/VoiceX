@@ -1,0 +1,569 @@
+//! Volcengine (ByteDance Doubao) Seed-TTS 2.0 backend.
+//!
+//! Uses the unidirectional streaming HTTP interface. Plan §5.4 records why that
+//! one and not the two WebSocket variants: the text is fully known before the
+//! request goes out, so bidirectional streaming solves a problem we do not have,
+//! and a WebSocket buys nothing over HTTP here except a connection lifecycle to
+//! manage.
+//!
+//! Audio arrives as base64 MP3 in many small chunks. Three stages run
+//! concurrently — network, decode, playback — because the whole point is to
+//! start speaking at the first chunk rather than after the last one.
+
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{self, Sender};
+use std::sync::{Arc, Mutex};
+use std::thread;
+
+use base64::Engine;
+use futures_util::StreamExt;
+use serde::Serialize;
+
+use super::decode::{decode_mp3_stream, ChunkSource};
+use super::playback::{negotiate_sample_rate, Playback, PlaybackHandle};
+use super::{log_event, CancelToken, TtsBackend, TtsError, TtsRequest, TtsStatus, TtsVoice};
+
+const ENDPOINT: &str = "https://openspeech.bytedance.com/api/v3/tts/unidirectional";
+
+/// Default resource id. Note this is the literal model string, **not** the
+/// instance id shown in the console — passing the instance id returns
+/// `45000030 requested resource not granted` (plan §5.4).
+pub const DEFAULT_RESOURCE_ID: &str = "seed-tts-2.0";
+
+/// Terminal status code the provider sends as the last chunk.
+const CODE_FINISHED: i64 = 20000000;
+
+/// Voices verified against Seed-TTS 2.0. The provider exposes no working
+/// speaker-list endpoint (plan §5.4), so this is a built-in allow-list; the
+/// settings page also accepts a hand-typed id for anything else the account has.
+const KNOWN_SPEAKERS: [(&str, &str, &str); 2] = [
+    ("zh_female_vv_uranus_bigtts", "Vivi", "zh-CN"),
+    ("zh_male_liufei_uranus_bigtts", "刘飞", "zh-CN"),
+];
+
+pub fn default_speaker() -> &'static str {
+    KNOWN_SPEAKERS[0].0
+}
+
+#[derive(Debug, Clone)]
+pub struct VolcengineConfig {
+    pub api_key: String,
+    pub resource_id: String,
+}
+
+#[derive(Serialize)]
+struct RequestBody<'a> {
+    user: User<'a>,
+    req_params: ReqParams<'a>,
+}
+
+#[derive(Serialize)]
+struct User<'a> {
+    uid: &'a str,
+}
+
+#[derive(Serialize)]
+struct ReqParams<'a> {
+    text: &'a str,
+    speaker: &'a str,
+    audio_params: AudioParams,
+}
+
+#[derive(Serialize)]
+struct AudioParams {
+    format: &'static str,
+    sample_rate: u32,
+    speech_rate: i32,
+    loudness_rate: i32,
+}
+
+/// Convert the stored 0.0..=1.0 rate into the provider's own scale.
+///
+/// The stored value is normalized around the macOS engine default of 0.5,
+/// which the settings UI shows as 1x on a 0.5x–2x slider. Volcengine takes
+/// 0 as neutral over a measured usable range of -50..=100 (plan §5.4), so the
+/// two scales line up on a single linear mapping: 0.5x → -50, 1x → 0, 2x → 100.
+fn speech_rate_from_normalized(rate: Option<f32>) -> i32 {
+    let Some(rate) = rate else { return 0 };
+    let multiplier = (rate / 0.5).clamp(0.5, 2.0);
+    (((multiplier - 1.0) * 100.0).round() as i32).clamp(-50, 100)
+}
+
+pub struct VolcengineBackend {
+    config: Mutex<VolcengineConfig>,
+    /// Filled in by the decode thread once it owns the output device, so `stop`
+    /// can cut the audio immediately instead of waiting for the network side to
+    /// notice. Shared rather than copied: the handle does not exist yet when
+    /// `start` returns.
+    playback: Arc<Mutex<Option<PlaybackHandle>>>,
+    speaking: Arc<AtomicBool>,
+}
+
+impl VolcengineBackend {
+    pub fn new(config: VolcengineConfig) -> Self {
+        Self {
+            config: Mutex::new(config),
+            playback: Arc::new(Mutex::new(None)),
+            speaking: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    pub fn apply_config(&self, config: VolcengineConfig) {
+        if let Ok(mut slot) = self.config.lock() {
+            *slot = config;
+        }
+    }
+
+    fn config(&self) -> Result<VolcengineConfig, TtsError> {
+        let config = self
+            .config
+            .lock()
+            .map(|slot| slot.clone())
+            .map_err(|_| TtsError::Backend("configuration is poisoned".to_string()))?;
+        if config.api_key.trim().is_empty() {
+            return Err(TtsError::Backend("no API key configured".to_string()));
+        }
+        Ok(config)
+    }
+}
+
+impl TtsBackend for VolcengineBackend {
+    fn name(&self) -> &'static str {
+        "volcengine"
+    }
+
+    fn list_voices(&self) -> Result<Vec<TtsVoice>, TtsError> {
+        Ok(KNOWN_SPEAKERS
+            .iter()
+            .map(|(id, name, language)| TtsVoice {
+                id: id.to_string(),
+                name: name.to_string(),
+                language: language.to_string(),
+            })
+            .collect())
+    }
+
+    fn start(&self, request: TtsRequest, token: CancelToken) -> Result<(), TtsError> {
+        let config = self.config()?;
+        let sample_rate = negotiate_sample_rate()
+            .map_err(|err| TtsError::Backend(format!("{} ({})", err, err.code())))?;
+
+        let speaker = request
+            .voice
+            .clone()
+            .filter(|id| !id.trim().is_empty())
+            .unwrap_or_else(|| default_speaker().to_string());
+        // Volcengine has no pitch parameter; the settings page hides that row
+        // for cloud providers (plan §5.4).
+        let speech_rate = speech_rate_from_normalized(request.rate);
+        let gain = request.volume.unwrap_or(1.0);
+
+        let (tx, rx) = mpsc::channel::<Vec<u8>>();
+        // Lets the decode side tell "the provider failed" apart from "the audio
+        // ended", which otherwise both look like a closed channel.
+        let network_error: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+
+        let source = ChunkSource::new(rx, token.clone());
+        let decode_token = token.clone();
+        let decode_error = network_error.clone();
+
+        // Clear any handle left by the previous utterance before publishing the
+        // slot, so a stop arriving now cannot reach a device we already closed.
+        if let Ok(mut slot) = self.playback.lock() {
+            *slot = None;
+        }
+        self.speaking.store(true, Ordering::SeqCst);
+
+        let playback_slot = self.playback.clone();
+        let speaking = self.speaking.clone();
+        thread::Builder::new()
+            .name("voicex-tts-cloud".to_string())
+            .spawn(move || {
+                run_playback(
+                    source,
+                    sample_rate,
+                    gain,
+                    decode_token,
+                    decode_error,
+                    playback_slot,
+                );
+                speaking.store(false, Ordering::SeqCst);
+            })
+            .map_err(|err| TtsError::Backend(format!("failed to spawn the decoder: {err}")))?;
+
+        let text = request.text;
+        let http_token = token;
+        let http_error = network_error;
+        tauri::async_runtime::spawn(async move {
+            let outcome = stream_audio(
+                &config,
+                &text,
+                &speaker,
+                sample_rate,
+                speech_rate,
+                &tx,
+                &http_token,
+            )
+            .await;
+            if let Err(err) = outcome {
+                if let Ok(mut slot) = http_error.lock() {
+                    *slot = Some(err);
+                }
+            }
+            // Closing the channel is what ends the decode loop.
+            drop(tx);
+        });
+
+        Ok(())
+    }
+
+    fn stop(&self) -> Result<(), TtsError> {
+        self.speaking.store(false, Ordering::SeqCst);
+        if let Ok(slot) = self.playback.lock() {
+            if let Some(handle) = slot.as_ref() {
+                handle.stop();
+            }
+        }
+        Ok(())
+    }
+
+    fn status(&self) -> TtsStatus {
+        if self.speaking.load(Ordering::SeqCst) {
+            TtsStatus::Speaking
+        } else {
+            TtsStatus::Idle
+        }
+    }
+}
+
+/// Decode and play, on a thread of its own because both block and because the
+/// output stream may not cross threads.
+fn run_playback(
+    source: ChunkSource,
+    sample_rate: u32,
+    gain: f32,
+    token: CancelToken,
+    network_error: Arc<Mutex<Option<String>>>,
+    handle_slot: Arc<Mutex<Option<PlaybackHandle>>>,
+) {
+    let playback = match Playback::open(sample_rate, gain) {
+        Ok(playback) => playback,
+        Err(err) => {
+            if token.finish() {
+                log_event(
+                    "speak_err",
+                    &[
+                        ("error", err.code().to_string()),
+                        ("detail", err.to_string()),
+                    ],
+                );
+            }
+            return;
+        }
+    };
+
+    if let Ok(mut slot) = handle_slot.lock() {
+        *slot = Some(playback.handle());
+    }
+
+    let mut started = false;
+    let decoded = decode_mp3_stream(source, sample_rate, |samples| {
+        if !started {
+            started = true;
+            log_event("speak_started", &[]);
+        }
+        playback.push(samples)
+    });
+
+    let failure = network_error.lock().ok().and_then(|slot| slot.clone());
+
+    match decoded {
+        Ok(_) if failure.is_none() => {
+            playback.mark_end_of_stream();
+            match playback.wait_until_drained(&token) {
+                Ok(true) => {
+                    if token.finish() {
+                        log_event("speak_finished", &[]);
+                    }
+                }
+                // Cancelled: whoever cancelled owns the session now.
+                Ok(false) => {}
+                Err(err) => {
+                    if token.finish() {
+                        log_event(
+                            "speak_err",
+                            &[
+                                ("error", err.code().to_string()),
+                                ("detail", err.to_string()),
+                            ],
+                        );
+                    }
+                }
+            }
+        }
+        // A network failure reads as a truncated stream, so report the real
+        // cause rather than the decoder's confusion about it.
+        _ => {
+            let detail = failure.unwrap_or_else(|| match &decoded {
+                Err(err) => err.to_string(),
+                Ok(_) => "the audio stream ended early".to_string(),
+            });
+            if token.finish() {
+                log_event(
+                    "speak_err",
+                    &[("error", "backend".to_string()), ("detail", detail)],
+                );
+            }
+        }
+    }
+}
+
+/// Stream the synthesis response, forwarding decoded audio bytes to `tx`.
+async fn stream_audio(
+    config: &VolcengineConfig,
+    text: &str,
+    speaker: &str,
+    sample_rate: u32,
+    speech_rate: i32,
+    tx: &Sender<Vec<u8>>,
+    token: &CancelToken,
+) -> Result<(), String> {
+    let body = RequestBody {
+        user: User { uid: "voicex" },
+        req_params: ReqParams {
+            text,
+            speaker,
+            audio_params: AudioParams {
+                format: "mp3",
+                sample_rate,
+                speech_rate,
+                loudness_rate: 0,
+            },
+        },
+    };
+
+    let response = reqwest::Client::new()
+        .post(ENDPOINT)
+        .header("X-Api-Key", &config.api_key)
+        .header("X-Api-Resource-Id", &config.resource_id)
+        .header("X-Api-Request-Id", uuid::Uuid::new_v4().to_string())
+        .json(&body)
+        .send()
+        .await
+        .map_err(|err| format!("request failed: {err}"))?;
+
+    let status = response.status();
+    if !status.is_success() {
+        let detail = response.text().await.unwrap_or_default();
+        return Err(format!("HTTP {status}: {}", first_line(&detail)));
+    }
+
+    let mut stream = response.bytes_stream();
+    let mut pending = Vec::<u8>::new();
+
+    while let Some(chunk) = stream.next().await {
+        if token.is_cancelled() {
+            return Ok(());
+        }
+        let chunk = chunk.map_err(|err| format!("stream broke: {err}"))?;
+        pending.extend_from_slice(&chunk);
+
+        // The response is newline-delimited JSON; a chunk may split a line.
+        while let Some(newline) = pending.iter().position(|byte| *byte == b'\n') {
+            let line: Vec<u8> = pending.drain(..=newline).collect();
+            if let Some(audio) = parse_line(&line[..line.len() - 1])? {
+                if tx.send(audio).is_err() {
+                    // The decoder is gone; nothing left to stream into.
+                    return Ok(());
+                }
+            }
+        }
+    }
+
+    if !pending.is_empty() {
+        if let Some(audio) = parse_line(&pending)? {
+            let _ = tx.send(audio);
+        }
+    }
+
+    Ok(())
+}
+
+/// Decode one response line into audio bytes, or `None` when it carries none.
+fn parse_line(line: &[u8]) -> Result<Option<Vec<u8>>, String> {
+    if line.iter().all(|byte| byte.is_ascii_whitespace()) {
+        return Ok(None);
+    }
+
+    let value: serde_json::Value =
+        serde_json::from_slice(line).map_err(|err| format!("malformed response: {err}"))?;
+
+    // The provider nests errors under `header` and successes at the top level.
+    let node = value.get("header").unwrap_or(&value);
+    let code = node.get("code").and_then(|code| code.as_i64()).unwrap_or(0);
+    if code != 0 && code != CODE_FINISHED {
+        let message = node
+            .get("message")
+            .and_then(|message| message.as_str())
+            .unwrap_or("unknown error");
+        return Err(format!("provider error {code}: {message}"));
+    }
+
+    let Some(data) = value.get("data").and_then(|data| data.as_str()) else {
+        return Ok(None);
+    };
+    if data.is_empty() {
+        return Ok(None);
+    }
+
+    base64::engine::general_purpose::STANDARD
+        .decode(data)
+        .map(Some)
+        .map_err(|err| format!("bad base64 in response: {err}"))
+}
+
+fn first_line(text: &str) -> String {
+    text.lines()
+        .next()
+        .unwrap_or_default()
+        .chars()
+        .take(200)
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_rate_scales_line_up_at_both_ends_and_the_middle() {
+        // Stored 0..1 around a 0.5 default, shown as 0.5x–2x, sent as -50..100.
+        // Getting this wrong is silent: the voice just speaks at the wrong speed.
+        assert_eq!(speech_rate_from_normalized(Some(0.25)), -50, "0.5x");
+        assert_eq!(speech_rate_from_normalized(Some(0.5)), 0, "1x is neutral");
+        assert_eq!(speech_rate_from_normalized(Some(1.0)), 100, "2x");
+        assert_eq!(speech_rate_from_normalized(None), 0, "unset is neutral");
+    }
+
+    #[test]
+    fn rates_outside_the_slider_are_clamped_to_what_the_provider_accepts() {
+        // Measured limits: below -50 and above 100 the provider stops changing.
+        assert_eq!(speech_rate_from_normalized(Some(0.0)), -50);
+        assert_eq!(speech_rate_from_normalized(Some(5.0)), 100);
+    }
+
+    #[test]
+    fn audio_lines_yield_bytes_and_the_terminal_line_yields_none() {
+        let audio = parse_line(br#"{"code":0,"message":"","data":"aGVsbG8="}"#)
+            .unwrap()
+            .unwrap();
+        assert_eq!(audio, b"hello");
+
+        let done = parse_line(br#"{"code":20000000,"message":"OK","data":null}"#).unwrap();
+        assert!(done.is_none(), "the terminal line carries no audio");
+
+        assert!(parse_line(b"   ").unwrap().is_none());
+    }
+
+    #[test]
+    fn provider_errors_are_reported_from_both_shapes_they_arrive_in() {
+        // Successes come back flat; failures come nested under `header`.
+        let flat = parse_line(
+            br#"{"reqid":"","code":55000000,"message":"resource ID is mismatched with speaker related resource"}"#,
+        )
+        .unwrap_err();
+        assert!(flat.contains("55000000"), "{flat}");
+
+        let nested = parse_line(
+            br#"{"header":{"reqid":"x","code":45000030,"message":"requested resource not granted"}}"#,
+        )
+        .unwrap_err();
+        assert!(nested.contains("45000030"), "{nested}");
+    }
+
+    /// End-to-end against the live service: network, streaming parse, MP3
+    /// decode and playback, in the same arrangement the backend uses. Plays
+    /// audio, so it is opt-in:
+    ///
+    /// ```text
+    /// VOLC_TTS_API_KEY=... cargo test --lib volcengine::tests::live -- --ignored --nocapture
+    /// ```
+    #[test]
+    #[ignore = "requires network access and credentials"]
+    fn live_synthesis_decodes_and_plays() {
+        use crate::tts::playback::Playback;
+        use crate::tts::SessionSlot;
+        use std::time::Instant;
+
+        let api_key = std::env::var("VOLC_TTS_API_KEY").expect("VOLC_TTS_API_KEY is not set");
+        let config = VolcengineConfig {
+            api_key,
+            resource_id: DEFAULT_RESOURCE_ID.to_string(),
+        };
+        let rate = negotiate_sample_rate().expect("no usable output sample rate");
+        eprintln!("negotiated sample rate: {rate} Hz");
+
+        let text = "火山引擎语音合成，端到端链路验证：网络流式接收、MP3 解码与本地播放。";
+        let slot = SessionSlot::default();
+        let token = slot.claim();
+        let (tx, rx) = mpsc::channel::<Vec<u8>>();
+        let source = ChunkSource::new(rx, token.clone());
+
+        let decode_token = token.clone();
+        let decoder = thread::spawn(move || {
+            let playback = Playback::open(rate, 1.0).expect("failed to open the output device");
+            let first = Arc::new(Mutex::new(None::<Instant>));
+            let seen = first.clone();
+            let started = Instant::now();
+            let samples = decode_mp3_stream(source, rate, |chunk| {
+                if let Ok(mut slot) = seen.lock() {
+                    slot.get_or_insert(started);
+                }
+                playback.push(chunk)
+            })
+            .expect("decode failed");
+            playback.mark_end_of_stream();
+            playback
+                .wait_until_drained(&decode_token)
+                .expect("playback stalled");
+            samples
+        });
+
+        let started = Instant::now();
+        let outcome = tauri::async_runtime::block_on(stream_audio(
+            &config,
+            text,
+            default_speaker(),
+            rate,
+            0,
+            &tx,
+            &token,
+        ));
+        drop(tx);
+        outcome.expect("streaming failed");
+
+        let samples = decoder.join().expect("decoder panicked");
+        let seconds = samples as f64 / rate as f64;
+        eprintln!(
+            "decoded {samples} samples ({seconds:.2} s) in {:?}",
+            started.elapsed()
+        );
+
+        assert!(
+            seconds > 2.0,
+            "expected several seconds of speech, decoded {seconds:.2} s"
+        );
+    }
+
+    #[test]
+    fn the_known_speakers_are_seed_tts_2_voices() {
+        // The classic *_moon_bigtts / *_mars_bigtts voices share nothing with
+        // Seed-TTS 2.0 and fail with code 55000000 (plan §5.4).
+        for (id, _, _) in KNOWN_SPEAKERS {
+            assert!(
+                id.ends_with("_uranus_bigtts"),
+                "{id} is not a Seed-TTS 2.0 voice"
+            );
+        }
+    }
+}

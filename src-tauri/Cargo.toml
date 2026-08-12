@@ -50,6 +50,9 @@ uuid = { version = "1", features = ["v4"] }
 
 # Audio capture
 cpal = "0.15"
+# MP3 decoding for cloud speech playback. Pure Rust and cross-platform, unlike
+# AudioToolbox; only the mp3 decoder is pulled in.
+symphonia = { version = "0.5", default-features = false, features = ["mp3"] }
 audiopus = { version = "0.3.0-rc.0", features = ["coder"] }
 audiopus_sys = { version = "0.2.2", features = ["static"] }
 ogg = "0.9"

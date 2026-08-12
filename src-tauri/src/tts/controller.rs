@@ -13,17 +13,29 @@ use std::thread;
 
 use tauri::AppHandle;
 
+use super::volcengine::{self, VolcengineBackend, VolcengineConfig};
 use super::{log_event, SessionSlot, StopReason, TtsBackend, TtsError, TtsRequest, TtsVoice};
+use crate::commands::settings::AppSettings;
 use crate::selection::{self, SelectionError, SelectionOutcome, SelectionRequest};
 
 /// Longest preview we will speak. The settings page sends a short fixed
 /// sentence; the cap only stops a malformed call from starting a long read.
 const PREVIEW_MAX_CHARS: usize = 500;
 
+/// Settings value selecting the cloud backend.
+const PROVIDER_VOLCENGINE: &str = "volcengine";
+
 #[derive(Default)]
 struct ControllerInner {
     app: Mutex<Option<AppHandle>>,
-    backend: Mutex<Option<Arc<dyn TtsBackend>>>,
+    /// The macOS system voice. Absent on other platforms.
+    system: Mutex<Option<Arc<dyn TtsBackend>>>,
+    /// Kept as its concrete type so credentials can be re-applied without
+    /// rebuilding it — the settings page changes them while the app runs.
+    volcengine: Mutex<Option<Arc<VolcengineBackend>>>,
+    /// Whichever backend owns the current session. `stop` has to reach that
+    /// one, not whichever provider the settings happen to name right now.
+    active: Mutex<Option<Arc<dyn TtsBackend>>>,
     /// Owns the whole read-and-speak lifetime, from the moment a read starts
     /// until speech ends, fails, or is stopped. One flag, one owner — the
     /// previous split between a `reading` bool and the backend's own state had
@@ -50,9 +62,18 @@ impl TtsController {
         {
             let backend: Arc<dyn TtsBackend> =
                 Arc::new(super::mac_system::MacSystemBackend::new(app.clone()));
-            if let Ok(mut slot) = self.inner.backend.lock() {
+            if let Ok(mut slot) = self.inner.system.lock() {
                 *slot = Some(backend);
             }
+        }
+
+        // Built unconditionally: it is network-only, so it works wherever the
+        // app runs, including where there is no system voice at all.
+        if let Ok(mut slot) = self.inner.volcengine.lock() {
+            *slot = Some(Arc::new(VolcengineBackend::new(VolcengineConfig {
+                api_key: String::new(),
+                resource_id: volcengine::DEFAULT_RESOURCE_ID.to_string(),
+            })));
         }
     }
 
@@ -74,8 +95,43 @@ impl TtsController {
         self.inner.app.lock().ok().and_then(|slot| slot.clone())
     }
 
-    fn backend(&self) -> Option<Arc<dyn TtsBackend>> {
-        self.inner.backend.lock().ok().and_then(|slot| slot.clone())
+    /// Resolve the backend the settings ask for, applying its credentials.
+    ///
+    /// Falls back to the system voice when the cloud provider is selected but
+    /// unavailable, rather than refusing to speak — but says so in the log, so
+    /// "why does it sound like the local voice" has an answer.
+    fn backend_for(&self, settings: Option<&AppSettings>) -> Option<Arc<dyn TtsBackend>> {
+        let provider = settings.map(|s| s.tts_provider_type.as_str()).unwrap_or("");
+
+        if provider == PROVIDER_VOLCENGINE {
+            let cloud = self
+                .inner
+                .volcengine
+                .lock()
+                .ok()
+                .and_then(|slot| slot.clone());
+            if let (Some(cloud), Some(settings)) = (cloud, settings) {
+                cloud.apply_config(VolcengineConfig {
+                    api_key: settings.volc_tts_api_key.clone(),
+                    resource_id: settings.volc_tts_resource_id.clone(),
+                });
+                return Some(cloud as Arc<dyn TtsBackend>);
+            }
+            log_event("backend_fallback", &[("provider", provider.to_string())]);
+        }
+
+        self.inner.system.lock().ok().and_then(|slot| slot.clone())
+    }
+
+    /// The backend that owns the session right now, for stopping it.
+    fn active_backend(&self) -> Option<Arc<dyn TtsBackend>> {
+        self.inner.active.lock().ok().and_then(|slot| slot.clone())
+    }
+
+    fn set_active_backend(&self, backend: Option<Arc<dyn TtsBackend>>) {
+        if let Ok(mut slot) = self.inner.active.lock() {
+            *slot = backend;
+        }
     }
 
     fn is_recording(&self) -> bool {
@@ -95,7 +151,8 @@ impl TtsController {
     ///
     /// Blocking, and hops to the main thread — never call from there.
     pub fn list_voices(&self) -> Result<Vec<TtsVoice>, TtsError> {
-        self.backend()
+        let settings = load_settings();
+        self.backend_for(settings.as_ref())
             .ok_or(TtsError::Unsupported)
             .and_then(|backend| backend.list_voices())
     }
@@ -115,7 +172,10 @@ impl TtsController {
         if self.is_recording() {
             return Err(TtsError::Backend("dictation is recording".to_string()));
         }
-        let backend = self.backend().ok_or(TtsError::Unsupported)?;
+        let settings = load_settings();
+        let backend = self
+            .backend_for(settings.as_ref())
+            .ok_or(TtsError::Unsupported)?;
 
         let text: String = text.chars().take(PREVIEW_MAX_CHARS).collect();
         if text.trim().is_empty() {
@@ -123,6 +183,7 @@ impl TtsController {
         }
 
         let token = self.inner.session.claim();
+        self.set_active_backend(Some(backend.clone()));
         log_event(
             "speak_start",
             &[
@@ -132,17 +193,19 @@ impl TtsController {
             ],
         );
 
-        backend
-            .start(request_from_settings(text), token)
-            .inspect_err(|err| {
-                log_event(
-                    "speak_err",
-                    &[
-                        ("error", err.code().to_string()),
-                        ("detail", err.to_string()),
-                    ],
-                );
-            })
+        let request = match settings {
+            Some(settings) => voice_request(&settings, text),
+            None => TtsRequest::plain(text),
+        };
+        backend.start(request, token).inspect_err(|err| {
+            log_event(
+                "speak_err",
+                &[
+                    ("error", err.code().to_string()),
+                    ("detail", err.to_string()),
+                ],
+            );
+        })
     }
 
     /// The read-selection hotkey fired.
@@ -184,7 +247,7 @@ impl TtsController {
 
         log_event("speak_stop", &[("reason", reason.as_str().to_string())]);
 
-        let Some(backend) = self.backend() else {
+        let Some(backend) = self.active_backend() else {
             return;
         };
         match backend.stop() {
@@ -213,18 +276,21 @@ impl TtsController {
             log_event("speak_err", &[("error", "not_initialized".to_string())]);
             return;
         };
-        let Some(backend) = self.backend() else {
+
+        // Settings decide which backend speaks, so they have to be read before
+        // the session is claimed. This runs on the hotkey hook's worker, and a
+        // database read is cheap enough not to matter there.
+        let settings = load_settings();
+        let Some(backend) = self.backend_for(settings.as_ref()) else {
             log_event("speak_err", &[("error", "unsupported".to_string())]);
             return;
         };
 
-        // Read on the worker thread, not here: this runs inside the hotkey
-        // hook's worker, and the database call has no business blocking it.
         let token = self.inner.session.claim();
+        self.set_active_backend(Some(backend.clone()));
         thread::Builder::new()
             .name("voicex-tts-read".to_string())
             .spawn(move || {
-                let settings = load_settings();
                 log_event("selection_start", &[]);
                 let result = selection::read_selection(SelectionRequest {
                     app,
@@ -288,7 +354,7 @@ impl TtsController {
 /// A failure here must not stop the user from being read to, so callers fall
 /// back to engine defaults — loudly, because silently speaking in the wrong
 /// voice is the kind of thing that gets reported as "the setting does nothing".
-fn load_settings() -> Option<crate::commands::settings::AppSettings> {
+fn load_settings() -> Option<AppSettings> {
     match crate::storage::get_settings() {
         Ok(settings) => Some(settings),
         Err(err) => {
@@ -301,25 +367,27 @@ fn load_settings() -> Option<crate::commands::settings::AppSettings> {
 
 /// Build a request carrying the user's voice parameters.
 ///
-/// Rate and volume are stored normalized (0..=1) and go straight through;
-/// pitch is stored in the engine's own 0.5..=2.0 scale. An empty voice id
-/// means "engine default", which is not the same as a voice named "".
-fn voice_request(settings: &crate::commands::settings::AppSettings, text: String) -> TtsRequest {
+/// Rate and volume are stored normalized (0..=1) and go straight through; each
+/// backend maps them onto its own scale. Pitch is macOS-only — Volcengine has
+/// no such parameter and ignores it (plan §5.4).
+///
+/// The voice id is **per provider**: a macOS voice identifier means nothing to
+/// a cloud provider and vice versa, so they are stored separately and picked
+/// here. An empty id means "backend default", which is not the same as a voice
+/// literally named "".
+fn voice_request(settings: &AppSettings, text: String) -> TtsRequest {
+    let voice = if settings.tts_provider_type == PROVIDER_VOLCENGINE {
+        settings.volc_tts_speaker.clone()
+    } else {
+        settings.tts_voice_id.clone()
+    };
+
     TtsRequest {
         text,
-        voice: Some(settings.tts_voice_id.clone()).filter(|id| !id.is_empty()),
+        voice: Some(voice).filter(|id| !id.trim().is_empty()),
         rate: Some(settings.tts_rate),
         volume: Some(settings.tts_volume),
         pitch: Some(settings.tts_pitch),
-    }
-}
-
-/// Voice parameters read fresh from the store, for callers outside the read
-/// path (the settings-page preview).
-fn request_from_settings(text: String) -> TtsRequest {
-    match load_settings() {
-        Some(settings) => voice_request(&settings, text),
-        None => TtsRequest::plain(text),
     }
 }
 
