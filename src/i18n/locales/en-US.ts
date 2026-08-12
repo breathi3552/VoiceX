@@ -196,6 +196,8 @@ const enUS = {
     volcResourceId: 'Resource ID',
     volcResourceIdNote: 'The model string (seed-tts-2.0 by default), not the console\'s instance id — an instance id is rejected.',
     volcSpeakerNote: 'Seed-TTS 2.0 has its own voices; classic Doubao voices do not work here. Type any other voice id and press Enter, then check it with Preview.',
+    cloudPrivacy: 'With a cloud engine, the text you select is sent to that provider to be synthesized. Neither reading history nor synthesized audio is stored.',
+    hotkeySystemNote: 'Independent of the built-in macOS Speak Selection (Option + Esc) — both can be used.',
     unsupportedPlatform: 'Read selection is not available on this platform yet.'
   },
   sync: {

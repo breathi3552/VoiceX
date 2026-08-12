@@ -272,6 +272,9 @@ onMounted(async () => {
         </div>
 
         <template v-if="isVolcengine">
+          <!-- Plan §3.4: told once, when the engine is chosen, rather than
+               asked on every read. -->
+          <div class="notice-box">{{ t('reading.cloudPrivacy') }}</div>
           <div class="field-row">
             <div class="field-text">
               <div class="field-label">{{ t('reading.volcApiKey') }}</div>
@@ -322,6 +325,7 @@ onMounted(async () => {
           <div class="field-text">
             <div class="field-label">{{ t('reading.hotkey') }}</div>
             <div class="field-note">{{ t('reading.hotkeyNote') }}</div>
+            <div class="field-note">{{ t('reading.hotkeySystemNote') }}</div>
           </div>
           <div class="field-control end">
             <div class="hotkey-display" :class="{ recording: isRecording }">

@@ -35,6 +35,46 @@ VoiceX maps three distinct intents to a single configurable hotkey:
 
 Hold threshold and double-tap window are configurable. Press **Escape** at any time to cancel and discard.
 
+## Read Selection
+
+VoiceX also works in the other direction: select text in **any application**,
+press **⌥⌘R** (configurable), and it reads the selection aloud. Press again, or
+press **Escape**, to stop immediately.
+
+| | Detail |
+|---|---|
+| **How text is read** | Straight from the Accessibility API where possible (8–15 ms); otherwise it falls back to a synthetic Command + C and restores your clipboard afterwards. The fallback can be switched off, at the cost of Safari and VS Code support |
+| **Speech engines** | The system voice (offline, no setup) or Volcengine Doubao Seed-TTS 2.0 (cloud, noticeably better). Voice, rate and volume are stored per engine |
+| **Yields to dictation** | Starting dictation stops reading — otherwise the microphone would record the speech and transcribe it back |
+
+### How this differs from the built-in "Speak selection"
+
+macOS has its own version (System Settings → Accessibility → Spoken Content,
+Option + Esc by default). Both can coexist, and the default hotkeys deliberately
+do not collide. The differences:
+
+- **Cloud-quality voices.** The built-in feature can only use local voices, and
+  every Chinese voice available to third-party apps on this platform is the
+  compact tier. It sounds better by default because it uses a Siri voice, and
+  Siri voices are not available to third-party applications. Going through a
+  cloud engine sidesteps that ceiling.
+- **Per-engine settings**, with a preview button so you can hear before deciding.
+- **One hotkey system shared with dictation**, so conflicts are surfaced in the
+  settings page instead of silently swallowing a key.
+
+The built-in feature does things VoiceX does not: word-level highlighting, and
+working in places we cannot reach such as the login window.
+
+### Where the text goes
+
+- The default engine is the **system voice, entirely local** — selected text
+  never leaves the machine.
+- With a cloud engine selected, **the selected text is sent to that provider**
+  for synthesis. The settings page says so when a cloud engine is chosen.
+- Reading history is **not** stored, and neither is synthesized audio. Ordinary
+  logs record length, how the text was read, the target application and error
+  codes — never the text itself.
+
 ## ASR Backends
 
 | Provider | Type | Notes |

@@ -90,6 +90,32 @@ fn is_promise_type(ty: &str) -> bool {
         .any(|prefix| ty.starts_with(prefix))
 }
 
+/// Add one type's payload to the running snapshot size, refusing past budget.
+///
+/// Split out from the capture loop so the rule can be tested: everything else
+/// in that loop needs a live `NSPasteboard`, and the fail-closed decisions are
+/// the part worth pinning down. Saturating on purpose — an overflow that
+/// wrapped would read as "plenty of room left".
+fn accumulate_snapshot_bytes(total: usize, added: usize) -> Result<usize, SelectionError> {
+    let total = total.saturating_add(added);
+    if total > MAX_SNAPSHOT_BYTES {
+        return Err(refuse(format!(
+            "clipboard exceeds {MAX_SNAPSHOT_BYTES} bytes"
+        )));
+    }
+    Ok(total)
+}
+
+/// Whether the snapshot may be written back.
+///
+/// Only when the pasteboard still holds exactly what our own copy put there.
+/// A clipboard manager or another app writing in that window owns the
+/// clipboard now, and restoring over it would destroy their write — the user
+/// would see their clipboard silently revert.
+fn may_restore(change_count_after_copy: isize, change_count_now: isize) -> bool {
+    change_count_after_copy == change_count_now
+}
+
 impl PasteboardSnapshot {
     fn capture(pasteboard: &NSPasteboard) -> Result<Self, SelectionError> {
         let mut items = Vec::new();
@@ -113,12 +139,7 @@ impl PasteboardSnapshot {
                     return Err(refuse(format!("unreadable type {type_name}")));
                 };
 
-                total_bytes = total_bytes.saturating_add(data.len());
-                if total_bytes > MAX_SNAPSHOT_BYTES {
-                    return Err(refuse(format!(
-                        "clipboard exceeds {MAX_SNAPSHOT_BYTES} bytes"
-                    )));
-                }
+                total_bytes = accumulate_snapshot_bytes(total_bytes, data.len())?;
 
                 captured.push((type_name, data.to_vec()));
             }
@@ -220,7 +241,7 @@ pub fn read_via_copy(
 
     // Only restore if nothing else has touched the pasteboard since our copy;
     // a clipboard manager or another app must not lose its write.
-    let restored = if pasteboard.changeCount() == change_count_after_copy {
+    let restored = if may_restore(change_count_after_copy, pasteboard.changeCount()) {
         match snapshot.restore(&pasteboard) {
             Ok(()) => true,
             Err(err) => {
@@ -284,5 +305,47 @@ mod tests {
         assert!(is_promise_type("Apple files promise pasteboard type"));
         assert!(!is_promise_type("public.utf8-plain-text"));
         assert!(!is_promise_type("public.png"));
+    }
+
+    #[test]
+    fn the_snapshot_budget_refuses_rather_than_holding_a_huge_clipboard() {
+        // Refusing the fallback keeps the clipboard untouched. Capturing it
+        // anyway would mean holding — and later rewriting — hundreds of
+        // megabytes to read a sentence.
+        assert_eq!(accumulate_snapshot_bytes(0, 1024).unwrap(), 1024);
+        assert_eq!(
+            accumulate_snapshot_bytes(MAX_SNAPSHOT_BYTES - 1, 1).unwrap(),
+            MAX_SNAPSHOT_BYTES,
+            "exactly at the budget still fits"
+        );
+
+        let refused = accumulate_snapshot_bytes(MAX_SNAPSHOT_BYTES, 1).unwrap_err();
+        assert_eq!(refused.code(), "clipboard_snapshot_refused");
+    }
+
+    #[test]
+    fn the_budget_is_a_running_total_across_types_not_a_per_type_limit() {
+        // One item can carry the same content in a dozen flavours; each under
+        // the cap while the whole is far over it.
+        let half = MAX_SNAPSHOT_BYTES / 2;
+        let after_first = accumulate_snapshot_bytes(0, half).unwrap();
+        assert!(accumulate_snapshot_bytes(after_first, half + 1).is_err());
+    }
+
+    #[test]
+    fn an_overflowing_total_refuses_instead_of_wrapping_to_roomy() {
+        // Saturating, not wrapping: a wrapped total would read as "plenty of
+        // room left" and let an unbounded capture through.
+        assert!(accumulate_snapshot_bytes(usize::MAX, usize::MAX).is_err());
+    }
+
+    #[test]
+    fn restore_is_skipped_when_anything_else_wrote_to_the_clipboard() {
+        // A clipboard manager writing between our copy and our restore now owns
+        // the clipboard. Restoring over it would destroy their write, and the
+        // user would see their clipboard silently revert.
+        assert!(may_restore(7, 7), "untouched since our own copy");
+        assert!(!may_restore(7, 8), "someone else wrote after us");
+        assert!(!may_restore(7, 6), "went backwards: not ours to overwrite");
     }
 }

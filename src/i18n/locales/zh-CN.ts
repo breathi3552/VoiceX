@@ -196,6 +196,8 @@ const zhCN = {
     volcResourceId: '资源 ID',
     volcResourceIdNote: '填模型字符串（默认 seed-tts-2.0），不是控制台里的实例 ID——填实例 ID 会被拒绝。',
     volcSpeakerNote: 'Seed-TTS 2.0 专属音色，与经典音色不通用。列表里没有的可直接输入音色 ID 后回车，再用试听验证。',
+    cloudPrivacy: '使用云端引擎时，你选中的文字会发送给该供应商用于合成。朗读历史与合成音频都不保存。',
+    hotkeySystemNote: '与 macOS 自带的「朗读所选内容」（Option + Esc）互不影响，两者可以同时使用。',
     unsupportedPlatform: '当前平台暂不支持选中朗读。'
   },
   sync: {
