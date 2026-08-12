@@ -248,6 +248,26 @@ function hasRecentLevel() {
   return lastLevelAt > 0 && performance.now() - lastLevelAt < 500;
 }
 
+function currentCompactBatchMode() {
+  return isCompactBatchMode() && currentMode !== "error";
+}
+
+/// Whether the bars are drawn right now.
+///
+/// Called on every level tick as well as on render, because whether a level is
+/// flowing is precisely what decides this — and levels start arriving *after*
+/// the render that switches to the speaking state. Computing it only at render
+/// time left the bars hidden for the whole read and revealed them for the last
+/// 400 ms, once the closing render happened to run with a level in hand.
+function applyWaveformVisibility(compactBatchMode: boolean) {
+  if (!waveformBars) return;
+  const readingWithoutLevel = isReadingMode() && !hasRecentLevel();
+  waveformBars.hidden =
+    !compactBatchMode ||
+    BATCH_WAVEFORM_STYLE !== "timeline" ||
+    readingWithoutLevel;
+}
+
 function setBatchLayoutMode(batchWaveMode: boolean, compactBatchMode: boolean) {
   document.body.classList.toggle("batch-wave-mode", batchWaveMode);
   document.body.classList.toggle("compact-batch-mode", compactBatchMode);
@@ -255,13 +275,7 @@ function setBatchLayoutMode(batchWaveMode: boolean, compactBatchMode: boolean) {
   if (textArea) {
     textArea.hidden = compactBatchMode;
   }
-  if (waveformBars) {
-    const readingWithoutLevel = isReadingMode() && !hasRecentLevel();
-    waveformBars.hidden =
-      !compactBatchMode ||
-      BATCH_WAVEFORM_STYLE !== "timeline" ||
-      readingWithoutLevel;
-  }
+  applyWaveformVisibility(compactBatchMode);
   if (waveformHybridCanvas) {
     waveformHybridCanvas.hidden =
       !compactBatchMode || BATCH_WAVEFORM_STYLE !== "hybrid";
@@ -879,8 +893,13 @@ async function initListeners() {
   });
 
   await add("state:audio_level", (event: { payload?: { level?: number } }) => {
+    const wasFlowing = hasRecentLevel();
     lastLevelAt = performance.now();
     handleAudioLevelUpdate(event.payload?.level);
+    // The first level of a read is what makes the bars appear.
+    if (!wasFlowing && isReadingMode()) {
+      applyWaveformVisibility(currentCompactBatchMode());
+    }
   });
 
   await add(

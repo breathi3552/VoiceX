@@ -538,12 +538,14 @@ mod tests {
         let decode_token = token.clone();
         let decoder = thread::spawn(move || {
             let playback = Playback::open(rate, 1.0).expect("failed to open the output device");
-            let first = Arc::new(Mutex::new(None::<Instant>));
-            let seen = first.clone();
-            let started = Instant::now();
+            let handle = playback.handle();
+            // Sampled while audio is actually playing, because this is what
+            // drives the HUD waveform and a level that only appears after the
+            // last sample would leave the bars hidden for the whole read.
+            let mut peak_level = 0.0f32;
             let samples = decode_mp3_stream(source, rate, |chunk| {
-                if let Ok(mut slot) = seen.lock() {
-                    slot.get_or_insert(started);
+                if let Some(level) = handle.level() {
+                    peak_level = peak_level.max(level);
                 }
                 playback.push(chunk)
             })
@@ -552,7 +554,7 @@ mod tests {
             playback
                 .wait_until_drained(&decode_token)
                 .expect("playback stalled");
-            samples
+            (samples, peak_level)
         });
 
         let started = Instant::now();
@@ -568,16 +570,21 @@ mod tests {
         drop(tx);
         outcome.expect("streaming failed");
 
-        let samples = decoder.join().expect("decoder panicked");
+        let (samples, peak_level) = decoder.join().expect("decoder panicked");
         let seconds = samples as f64 / rate as f64;
         eprintln!(
-            "decoded {samples} samples ({seconds:.2} s) in {:?}",
+            "decoded {samples} samples ({seconds:.2} s) in {:?}, peak level {peak_level:.3}",
             started.elapsed()
         );
 
         assert!(
             seconds > 2.0,
             "expected several seconds of speech, decoded {seconds:.2} s"
+        );
+        assert!(
+            peak_level > 0.05,
+            "the HUD waveform is driven by this level, and it stayed at {peak_level:.3} \
+             while audio was playing"
         );
     }
 
