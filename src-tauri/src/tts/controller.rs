@@ -14,13 +14,31 @@ use std::thread;
 use tauri::AppHandle;
 
 use super::volcengine::{self, VolcengineBackend, VolcengineConfig};
-use super::{log_event, SessionSlot, StopReason, TtsBackend, TtsError, TtsRequest, TtsVoice};
+use super::{
+    log_event, SessionSlot, StopReason, TtsBackend, TtsError, TtsRequest, TtsStatus, TtsVoice,
+};
 use crate::commands::settings::AppSettings;
 use crate::selection::{self, SelectionError, SelectionOutcome, SelectionRequest};
+use crate::services::hud_service::{HudService, ReadingPhase};
 
 /// Longest preview we will speak. The settings page sends a short fixed
 /// sentence; the cap only stops a malformed call from starting a long read.
 const PREVIEW_MAX_CHARS: usize = 500;
+
+/// How often the HUD driver samples the session and backend state.
+///
+/// Polling, not events: the eventual signal is the phase-3
+/// `AVSpeechSynthesizerDelegate`, and building an observer channel before that
+/// exists would mean designing it twice. It also has to work for the cloud
+/// backend, which has no delegate at all.
+const HUD_POLL: std::time::Duration = std::time::Duration::from_millis(60);
+
+/// How long the HUD lingers after a read ends, so a short one does not blink.
+const HUD_LINGER_MS: u64 = 400;
+
+/// How long an error stays on screen. Longer, because it is the only place a
+/// failed read is visible at all.
+const HUD_ERROR_LINGER_MS: u64 = 2_600;
 
 /// Settings value selecting the cloud backend.
 const PROVIDER_VOLCENGINE: &str = "volcengine";
@@ -45,6 +63,10 @@ struct ControllerInner {
     /// Set while dictation is recording. Reading is refused then: the speech
     /// would be picked up by the microphone and transcribed.
     recording: Mutex<Option<Arc<AtomicBool>>>,
+    /// Shared with the dictation session rather than built fresh, so both
+    /// drive one HUD window and cannot fight over its hide timer. Reading and
+    /// dictation are mutually exclusive, so they never want it at once.
+    hud: Mutex<Option<HudService>>,
 }
 
 #[derive(Clone, Default)]
@@ -83,6 +105,70 @@ impl TtsController {
         if let Ok(mut slot) = self.inner.recording.lock() {
             *slot = Some(recording);
         }
+    }
+
+    /// Share the dictation session's HUD so reads can show their state there.
+    pub fn attach_hud(&self, hud: HudService) {
+        if let Ok(mut slot) = self.inner.hud.lock() {
+            *slot = Some(hud);
+        }
+    }
+
+    fn hud(&self) -> Option<HudService> {
+        self.inner.hud.lock().ok().and_then(|slot| slot.clone())
+    }
+
+    /// Show the read's progress until the session ends, then get out of the way.
+    ///
+    /// Runs for the lifetime of one read. Phase comes from the backend's own
+    /// `status`, which reports whether audio is actually coming out — the point
+    /// of the HUD is the 300-700 ms before that happens on a cloud provider
+    /// (plan §5.4), which is otherwise indistinguishable from a dead hotkey.
+    /// `failure` is how the read reports a problem: the driver owns the HUD for
+    /// the whole read, so letting anyone else write to it would race the hide it
+    /// schedules on the way out.
+    fn spawn_hud_driver(&self, backend: Arc<dyn TtsBackend>, failure: Arc<Mutex<Option<String>>>) {
+        let Some(hud) = self.hud() else { return };
+        let session = self.inner.session.clone();
+
+        hud.cancel_hide();
+        hud.show(false);
+        hud.emit_error(None);
+        hud.emit_reading(Some(ReadingPhase::Preparing));
+
+        thread::Builder::new()
+            .name("voicex-tts-hud".to_string())
+            .spawn(move || {
+                let mut shown = ReadingPhase::Preparing;
+                while session.is_active() {
+                    let phase = match backend.status() {
+                        TtsStatus::Speaking => ReadingPhase::Speaking,
+                        TtsStatus::Idle => ReadingPhase::Preparing,
+                    };
+                    if phase != shown {
+                        shown = phase;
+                        hud.emit_reading(Some(phase));
+                    }
+                    thread::sleep(HUD_POLL);
+                }
+
+                hud.emit_reading(None);
+                let reported = failure.lock().ok().and_then(|slot| slot.clone());
+                let hud_for_hide = hud.clone();
+                match reported {
+                    // Without this a failed read is completely silent: the user
+                    // pressed the hotkey and nothing whatsoever happened.
+                    Some(code) => {
+                        hud.emit_error(Some(&code));
+                        hud.schedule_hide(HUD_ERROR_LINGER_MS, move || {
+                            hud_for_hide.emit_error(None);
+                            hud_for_hide.hide();
+                        });
+                    }
+                    None => hud.schedule_hide(HUD_LINGER_MS, move || hud_for_hide.hide()),
+                }
+            })
+            .expect("failed to spawn the TTS HUD driver");
     }
 
     /// Lock-free "is a read or speech in progress" view for the keyboard hook,
@@ -265,8 +351,12 @@ impl TtsController {
             return;
         };
         match backend.stop() {
-            // Distinct from `speak_stop`, which only records the request: this
-            // is the engine confirming it actually stopped.
+            // Distinct from `speak_stop`, which only records the request. How
+            // much more it means depends on the backend: the system voice hops
+            // to the main thread and returns once the engine has stopped, while
+            // a cloud backend only sets the flag its audio callback reads, so
+            // silence follows on the next callback rather than before this
+            // returns.
             Ok(()) => log_event("speak_stopped", &[("reason", reason.as_str().to_string())]),
             Err(err) => log_event(
                 "speak_err",
@@ -306,6 +396,9 @@ impl TtsController {
 
         let token = self.inner.session.claim();
         self.set_active_backend(Some(backend.clone()));
+        let failure: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        self.spawn_hud_driver(backend.clone(), failure.clone());
+
         thread::Builder::new()
             .name("voicex-tts-read".to_string())
             .spawn(move || {
@@ -357,6 +450,11 @@ impl TtsController {
                     }
                     Err(err) => {
                         log_selection_error(&err);
+                        // Record before releasing the session: the HUD driver
+                        // reads this the moment it sees the session go idle.
+                        if let Ok(mut slot) = failure.lock() {
+                            *slot = Some(err.code().to_string());
+                        }
                         // Nothing will speak, so hand the session back — but
                         // only if a newer request has not already claimed it.
                         token.finish();
@@ -495,7 +593,10 @@ mod tests {
 
         settings.tts_provider_type = "system".to_string();
         let local = voice_request(&settings, "hi".to_string());
-        assert_eq!(local.voice.as_deref(), Some("com.apple.voice.compact.zh-CN.Tingting"));
+        assert_eq!(
+            local.voice.as_deref(),
+            Some("com.apple.voice.compact.zh-CN.Tingting")
+        );
         assert_eq!(local.rate, Some(0.9));
         assert_eq!(local.volume, Some(0.4));
 

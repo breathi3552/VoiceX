@@ -641,7 +641,14 @@ const enUS = {
     error: 'Connection failed',
     recognizing: 'Recognizing...',
     recording: 'Recording...',
-    startRecording: 'Press the hotkey to start recording'
+    startRecording: 'Press the hotkey to start recording',
+    reading: 'Reading aloud...',
+    readingPrepare: 'Preparing to read...',
+    readingNoSelection: 'Nothing is selected',
+    readingPermissionDenied: 'Accessibility permission missing',
+    readingSecureInput: 'Secure input is active',
+    readingFocusIsSelf: 'Switch to the target app first',
+    readingUnsupported: 'Cannot read the selection here'
   }
 }
 

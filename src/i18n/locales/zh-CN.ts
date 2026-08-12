@@ -641,7 +641,14 @@ const zhCN = {
     error: '连接失败',
     recognizing: '正在识别...',
     recording: '正在录音...',
-    startRecording: '按下热键开始录音'
+    startRecording: '按下热键开始录音',
+    reading: '正在朗读...',
+    readingPrepare: '正在准备朗读...',
+    readingNoSelection: '没有选中文字',
+    readingPermissionDenied: '缺少辅助功能权限',
+    readingSecureInput: '安全输入中，无法取词',
+    readingFocusIsSelf: '请先切到目标应用',
+    readingUnsupported: '这个位置读不到选中文字'
   }
 }
 

@@ -15,6 +15,28 @@ pub struct HudService {
     snapshot: std::sync::Arc<std::sync::Mutex<HudSnapshot>>,
 }
 
+/// What a selected-text read is doing, as the HUD shows it.
+///
+/// The two phases exist because a cloud provider takes 300–700 ms to produce
+/// its first audio (plan §5.4). Without something on screen, that gap is
+/// indistinguishable from the hotkey not having worked at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReadingPhase {
+    /// Reading the selection and waiting for the engine's first audio.
+    Preparing,
+    /// Audio is actually coming out.
+    Speaking,
+}
+
+impl ReadingPhase {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ReadingPhase::Preparing => "preparing",
+            ReadingPhase::Speaking => "speaking",
+        }
+    }
+}
+
 const STREAM_HUD_WIDTH: f64 = 256.0;
 const STREAM_HUD_HEIGHT: f64 = 100.0;
 const BATCH_HUD_WIDTH: f64 = 204.0;
@@ -200,6 +222,14 @@ impl HudService {
         let _ = self.app_handle.emit_to("hud", event_name, payload);
     }
 
+    /// Report the state of a selected-text read. `None` means it ended.
+    pub fn emit_reading(&self, phase: Option<ReadingPhase>) {
+        let payload = json!({ "phase": phase.map(ReadingPhase::as_str) });
+        self.cache_event("state:reading", &payload);
+        let _ = self.app_handle.emit("state:reading", payload.clone());
+        let _ = self.app_handle.emit_to("hud", "state:reading", payload);
+    }
+
     pub fn emit_error(&self, message: Option<&str>) {
         let payload = json!({
             "message": message,
@@ -218,5 +248,19 @@ impl HudService {
         self.clear_transcript();
         self.emit_audio_level(0.0);
         self.emit_audio_spectrum(&[]);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ReadingPhase;
+
+    #[test]
+    fn reading_phase_tokens_match_what_the_hud_switches_on() {
+        // `hud.ts` compares these strings literally; renaming one here without
+        // renaming it there leaves the HUD stuck on its previous state with no
+        // error anywhere.
+        assert_eq!(ReadingPhase::Preparing.as_str(), "preparing");
+        assert_eq!(ReadingPhase::Speaking.as_str(), "speaking");
     }
 }

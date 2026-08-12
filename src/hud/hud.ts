@@ -47,7 +47,14 @@ let currentMode:
   | "hands_free"
   | "recognizing"
   | "correcting"
+  // Selected-text reading. Two modes, not one, because a cloud engine takes
+  // 300-700 ms to produce its first audio and that silence otherwise looks
+  // exactly like the hotkey having done nothing.
+  | "reading_prepare"
+  | "reading_speak"
   | "error" = "idle";
+// Stable error code from the backend, mapped to display text at render time.
+let currentErrorCode: string | null = null;
 let currentIntent: "assistant" | "translate_en" = "assistant";
 let hudPresentation: "stream" | "batch" = "stream";
 let lastActiveIcon: "mic" | "waveform" | "cloud" | "wand" = "mic";
@@ -197,6 +204,22 @@ function setHudLocale(locale: string | undefined) {
   renderTranscript();
 }
 
+/// Selection failures the user can act on. Anything else falls back to the
+/// generic error text rather than showing a raw code.
+const readingErrorMessages: Record<string, keyof typeof zhCN.hud> = {
+  no_selection: "readingNoSelection",
+  permission_denied: "readingPermissionDenied",
+  secure_input: "readingSecureInput",
+  focus_is_self: "readingFocusIsSelf",
+  unsupported_control: "readingUnsupported",
+  copy_timeout: "readingUnsupported",
+};
+
+function readingErrorText() {
+  const key = currentErrorCode ? readingErrorMessages[currentErrorCode] : undefined;
+  return key ? t(key) : null;
+}
+
 function showIcon(name: keyof typeof icons) {
   Object.values(icons).forEach((icon) => icon?.classList.remove("active"));
   icons[name]?.classList.add("active");
@@ -258,6 +281,18 @@ function updateStatus(mode: typeof currentMode) {
       showIcon("wand");
       statusIcon?.classList.add("animating");
       lastActiveIcon = "wand";
+      break;
+    case "reading_prepare":
+      document.body.classList.add("recognizing");
+      showIcon("cloud");
+      statusIcon?.classList.add("animating");
+      lastActiveIcon = "cloud";
+      break;
+    case "reading_speak":
+      document.body.classList.add("recording");
+      showIcon("waveform");
+      statusIcon?.classList.add("animating");
+      lastActiveIcon = "waveform";
       break;
     case "error":
       document.body.classList.add("error");
@@ -625,9 +660,13 @@ function renderTranscript() {
       currentMode === "correcting"
         ? t("processingText")
         : currentMode === "error"
-          ? t("error")
+          ? readingErrorText() ?? t("error")
         : currentMode === "recognizing"
           ? t("recognizing")
+          : currentMode === "reading_prepare"
+            ? t("readingPrepare")
+          : currentMode === "reading_speak"
+            ? t("reading")
           : currentMode === "push_to_talk" || currentMode === "hands_free"
             ? t("recording")
             : t("startRecording");
@@ -790,7 +829,24 @@ async function initListeners() {
   });
 
   await add("state:error", (event: { payload?: { message?: string } }) => {
+    currentErrorCode = event.payload?.message ?? null;
     handleErrorUpdate(event.payload?.message);
+  });
+
+  await add("state:reading", (event: { payload?: { phase?: string } }) => {
+    const phase = event.payload?.phase;
+    if (phase === "preparing") {
+      updateStatus("reading_prepare");
+    } else if (phase === "speaking") {
+      updateStatus("reading_speak");
+    } else if (
+      currentMode === "reading_prepare" ||
+      currentMode === "reading_speak"
+    ) {
+      // Only clear a mode we own. A read ending after dictation already took
+      // over must not wipe the dictation state off the HUD.
+      updateStatus("idle");
+    }
   });
 
   await add(

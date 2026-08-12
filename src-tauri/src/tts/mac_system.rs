@@ -123,6 +123,12 @@ impl MacSystemBackend {
                     if is_speaking {
                         if !observed_speaking {
                             observed_speaking = true;
+                            // Only now is the utterance audible. `status` says
+                            // so from here rather than from the moment the
+                            // engine accepted it, because the HUD distinguishes
+                            // "waiting" from "speaking" and the gap between
+                            // them is exactly what it exists to show.
+                            state.speaking.store(true, Ordering::SeqCst);
                             log_event("speak_started", &[]);
                         }
                     } else if observed_speaking {
@@ -217,7 +223,9 @@ impl TtsBackend for MacSystemBackend {
 
         match queued {
             Ok(true) => {
-                self.state.speaking.store(true, Ordering::SeqCst);
+                // `speaking` is set by the poller once the engine reports it,
+                // not here: accepting an utterance is not the same as making a
+                // sound, and callers ask this to know which one happened.
                 self.spawn_completion_poller(token);
                 Ok(())
             }

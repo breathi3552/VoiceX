@@ -1248,7 +1248,8 @@ impl SessionController {
         self.next_audio_epoch();
     }
 
-    fn hud_service(&self) -> Option<HudService> {
+    /// Shared with the TTS controller so both drive one HUD window.
+    pub fn hud_service(&self) -> Option<HudService> {
         self.hud_service.lock().ok().and_then(|h| h.clone())
     }
 

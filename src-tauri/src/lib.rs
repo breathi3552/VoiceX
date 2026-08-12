@@ -138,6 +138,12 @@ pub fn init_app(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     // Reading must be refused while the microphone is live, or the speech gets
     // recorded and transcribed back (plan §3.3).
     tts_controller.attach_recording_flag(session_coordinator.recording_flag());
+    // Reading shows its state in the same HUD as dictation. Safe to share
+    // because the two are mutually exclusive, and necessary because two
+    // HudService instances would race each other's hide timers.
+    if let Some(hud) = session_controller.hud_service() {
+        tts_controller.attach_hud(hud);
+    }
 
     manager.start_listener(
         app.handle().clone(),

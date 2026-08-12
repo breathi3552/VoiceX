@@ -144,6 +144,37 @@ impl TtsBackend for VolcengineBackend {
     }
 
     fn start(&self, request: TtsRequest, token: CancelToken) -> Result<(), TtsError> {
+        // Every failure path has to hand the session back. The trait requires
+        // it, and the cost of missing one is not subtle: the session stays
+        // claimed, so the hotkey is stuck in "stop" mode from then on and the
+        // HUD shows "preparing" forever. The prologue below has three fallible
+        // steps, which is why this wraps rather than repeating `finish` at each.
+        self.begin(request, token.clone()).inspect_err(|_| {
+            token.finish();
+        })
+    }
+
+    fn stop(&self) -> Result<(), TtsError> {
+        self.speaking.store(false, Ordering::SeqCst);
+        if let Ok(slot) = self.playback.lock() {
+            if let Some(handle) = slot.as_ref() {
+                handle.stop();
+            }
+        }
+        Ok(())
+    }
+
+    fn status(&self) -> TtsStatus {
+        if self.speaking.load(Ordering::SeqCst) {
+            TtsStatus::Speaking
+        } else {
+            TtsStatus::Idle
+        }
+    }
+}
+
+impl VolcengineBackend {
+    fn begin(&self, request: TtsRequest, token: CancelToken) -> Result<(), TtsError> {
         let config = self.config()?;
         let sample_rate = negotiate_sample_rate()
             .map_err(|err| TtsError::Backend(format!("{} ({})", err, err.code())))?;
@@ -172,9 +203,11 @@ impl TtsBackend for VolcengineBackend {
         if let Ok(mut slot) = self.playback.lock() {
             *slot = None;
         }
-        self.speaking.store(true, Ordering::SeqCst);
 
         let playback_slot = self.playback.clone();
+        // Raised by the decode thread when the first samples reach the device,
+        // not here: a request in flight is not a sound, and the HUD tells those
+        // two states apart — the 300-700 ms between them is what it shows.
         let speaking = self.speaking.clone();
         thread::Builder::new()
             .name("voicex-tts-cloud".to_string())
@@ -186,6 +219,7 @@ impl TtsBackend for VolcengineBackend {
                     decode_token,
                     decode_error,
                     playback_slot,
+                    speaking.clone(),
                 );
                 speaking.store(false, Ordering::SeqCst);
             })
@@ -216,28 +250,11 @@ impl TtsBackend for VolcengineBackend {
 
         Ok(())
     }
-
-    fn stop(&self) -> Result<(), TtsError> {
-        self.speaking.store(false, Ordering::SeqCst);
-        if let Ok(slot) = self.playback.lock() {
-            if let Some(handle) = slot.as_ref() {
-                handle.stop();
-            }
-        }
-        Ok(())
-    }
-
-    fn status(&self) -> TtsStatus {
-        if self.speaking.load(Ordering::SeqCst) {
-            TtsStatus::Speaking
-        } else {
-            TtsStatus::Idle
-        }
-    }
 }
 
 /// Decode and play, on a thread of its own because both block and because the
 /// output stream may not cross threads.
+#[allow(clippy::too_many_arguments)]
 fn run_playback(
     source: ChunkSource,
     sample_rate: u32,
@@ -245,6 +262,7 @@ fn run_playback(
     token: CancelToken,
     network_error: Arc<Mutex<Option<String>>>,
     handle_slot: Arc<Mutex<Option<PlaybackHandle>>>,
+    speaking: Arc<AtomicBool>,
 ) {
     let playback = match Playback::open(sample_rate, gain) {
         Ok(playback) => playback,
@@ -270,6 +288,7 @@ fn run_playback(
     let decoded = decode_mp3_stream(source, sample_rate, |samples| {
         if !started {
             started = true;
+            speaking.store(true, Ordering::SeqCst);
             log_event("speak_started", &[]);
         }
         playback.push(samples)
@@ -553,6 +572,26 @@ mod tests {
             seconds > 2.0,
             "expected several seconds of speech, decoded {seconds:.2} s"
         );
+    }
+
+    #[test]
+    fn a_refused_start_hands_the_session_back() {
+        // Without this the session stays claimed forever: the read hotkey turns
+        // into a permanent "stop", and the HUD sits on "preparing" with nothing
+        // ever coming. Reachable by simply not having configured a key yet.
+        let backend = VolcengineBackend::new(VolcengineConfig {
+            api_key: String::new(),
+            resource_id: DEFAULT_RESOURCE_ID.to_string(),
+        });
+        let slot = crate::tts::SessionSlot::default();
+        let token = slot.claim();
+        assert!(slot.is_active());
+
+        let outcome = backend.start(TtsRequest::plain("hi".to_string()), token);
+
+        assert!(outcome.is_err(), "an unconfigured backend must refuse");
+        assert!(!slot.is_active(), "a refusal must release the session");
+        assert_eq!(backend.status(), TtsStatus::Idle);
     }
 
     #[test]
