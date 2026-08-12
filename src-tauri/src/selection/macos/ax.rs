@@ -6,6 +6,7 @@
 //! Every call must happen on the selection worker thread (see
 //! [`crate::selection`]) — the AX API is single-threaded.
 
+use core_foundation::array::{CFArray, CFArrayRef};
 use core_foundation::base::{CFGetTypeID, CFRelease, CFTypeID, CFTypeRef, TCFType};
 use core_foundation::string::{CFString, CFStringRef};
 
@@ -19,6 +20,9 @@ const K_AX_ERROR_ATTRIBUTE_UNSUPPORTED: AXError = -25205;
 const K_AX_ERROR_NO_VALUE: AXError = -25212;
 const K_AX_ERROR_API_DISABLED: AXError = -25211;
 const K_AX_ERROR_NOT_IMPLEMENTED: AXError = -25208;
+/// Not an `AXError`: our own marker for "the attribute answered with something
+/// that is not a string". Outside the API's allocated range on purpose.
+const WRONG_TYPE_STATUS: AXError = 1;
 
 #[repr(C)]
 struct __AXUIElement {
@@ -35,6 +39,7 @@ extern "C" {
         attribute: CFStringRef,
         value: *mut CFTypeRef,
     ) -> AXError;
+    fn AXUIElementCopyAttributeNames(element: AXUIElementRef, names: *mut CFArrayRef) -> AXError;
     fn AXUIElementGetTypeID() -> CFTypeID;
 }
 
@@ -65,11 +70,67 @@ impl Drop for AxElement {
 /// What an attribute read produced. `Unsupported` and `Empty` are deliberately
 /// distinct: the former means "ask the next layer", the latter means "this
 /// control is authoritative and nothing is selected".
+///
+/// Each variant carries the raw `AXError` it came from. Several distinct codes
+/// collapse into `Unsupported`, and telling them apart is the whole point of
+/// the diagnostic: "this role has no such attribute" and "the element went
+/// stale mid-read" both fall back to Copy, but only the first one means the
+/// Accessibility path is genuinely a dead end for that application.
 pub enum AttributeRead {
     Text(String),
-    Empty,
-    Unsupported,
+    Empty(AXError),
+    Unsupported(AXError),
     ApiDisabled,
+}
+
+impl AttributeRead {
+    /// Stable token for the structured log. Part of the harness contract.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            AttributeRead::Text(_) => "text",
+            AttributeRead::Empty(_) => "empty",
+            AttributeRead::Unsupported(_) => "unsupported",
+            AttributeRead::ApiDisabled => "api_disabled",
+        }
+    }
+
+    pub fn status(&self) -> AXError {
+        match self {
+            AttributeRead::Text(_) => K_AX_ERROR_SUCCESS,
+            AttributeRead::Empty(status) | AttributeRead::Unsupported(status) => *status,
+            AttributeRead::ApiDisabled => K_AX_ERROR_API_DISABLED,
+        }
+    }
+}
+
+/// Which selection-related attributes the focused element advertises.
+///
+/// Answers, in one AX round-trip, the question phase 1 turns on: whether the
+/// range-reading layer has anything to read. An element that does not list
+/// `AXSelectedTextRange` cannot serve it, and a WebKit web area that lists
+/// `AXSelectedTextMarkerRange` instead needs the marker API rather than the
+/// standard one (plan §5).
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct SelectionAttributes {
+    /// None when the element refused to enumerate its attributes at all.
+    pub enumerated: bool,
+    pub selected_text: bool,
+    pub selected_text_range: bool,
+    pub selected_text_marker_range: bool,
+    pub value: bool,
+}
+
+impl SelectionAttributes {
+    fn from_names(names: &[String]) -> Self {
+        let has = |needle: &str| names.iter().any(|name| name == needle);
+        Self {
+            enumerated: true,
+            selected_text: has("AXSelectedText"),
+            selected_text_range: has("AXSelectedTextRange"),
+            selected_text_marker_range: has("AXSelectedTextMarkerRange"),
+            value: has("AXValue"),
+        }
+    }
 }
 
 pub struct FocusedElement {
@@ -162,9 +223,108 @@ impl FocusedElement {
         self.role.as_deref()
     }
 
+    pub fn subrole(&self) -> Option<&str> {
+        self.subrole.as_deref()
+    }
+
     pub fn selected_text(&self) -> AttributeRead {
         read_string_attribute(&self.element, "AXSelectedText")
     }
+
+    /// Enumerate the element's attributes and report the selection-related ones.
+    ///
+    /// Diagnostic only — nothing in the read path branches on it. The full list
+    /// goes to `debug` because it is long and only interesting when adding a new
+    /// application to the harness.
+    pub fn selection_attributes(&self) -> SelectionAttributes {
+        let Some(names) = copy_attribute_names(&self.element) else {
+            return SelectionAttributes::default();
+        };
+        log::debug!(
+            "Focused element role={:?} advertises attributes: {}",
+            self.role,
+            names.join(",")
+        );
+        SelectionAttributes::from_names(&names)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn names(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn attribute_probe_separates_standard_range_from_the_webkit_marker_range() {
+        // A WebKit web area: it offers the marker API instead of the standard
+        // range, which is exactly the case where phase 1's range layer would not
+        // have helped (plan §5).
+        let web_area = SelectionAttributes::from_names(&names(&[
+            "AXRole",
+            "AXSelectedTextMarkerRange",
+            "AXValue",
+        ]));
+        assert!(web_area.enumerated);
+        assert!(!web_area.selected_text);
+        assert!(!web_area.selected_text_range);
+        assert!(web_area.selected_text_marker_range);
+
+        let text_area = SelectionAttributes::from_names(&names(&[
+            "AXRole",
+            "AXSelectedText",
+            "AXSelectedTextRange",
+        ]));
+        assert!(text_area.selected_text);
+        assert!(text_area.selected_text_range);
+        assert!(!text_area.selected_text_marker_range);
+    }
+
+    #[test]
+    fn an_element_that_refuses_enumeration_is_not_mistaken_for_one_with_no_attributes() {
+        // Both report every flag false; only `enumerated` says whether that is a
+        // fact about the element or a failed query.
+        assert!(!SelectionAttributes::default().enumerated);
+        assert!(SelectionAttributes::from_names(&names(&["AXRole"])).enumerated);
+    }
+
+    #[test]
+    fn empty_keeps_the_status_that_produced_it() {
+        // "Answered with an empty string" and "has no value" both read as empty
+        // but are different facts about the control.
+        assert_eq!(AttributeRead::Empty(K_AX_ERROR_SUCCESS).kind(), "empty");
+        assert_eq!(AttributeRead::Empty(K_AX_ERROR_SUCCESS).status(), 0);
+        assert_eq!(
+            AttributeRead::Empty(K_AX_ERROR_NO_VALUE).status(),
+            K_AX_ERROR_NO_VALUE
+        );
+    }
+
+    #[test]
+    fn unsupported_keeps_the_underlying_error_apart() {
+        // Both fall back to Copy, but only the first means the role genuinely
+        // does not implement the attribute.
+        let unsupported = AttributeRead::Unsupported(K_AX_ERROR_ATTRIBUTE_UNSUPPORTED);
+        let not_implemented = AttributeRead::Unsupported(K_AX_ERROR_NOT_IMPLEMENTED);
+        assert_eq!(unsupported.kind(), not_implemented.kind());
+        assert_ne!(unsupported.status(), not_implemented.status());
+    }
+}
+
+fn copy_attribute_names(element: &AxElement) -> Option<Vec<String>> {
+    let mut names: CFArrayRef = std::ptr::null();
+    let status = unsafe { AXUIElementCopyAttributeNames(element.0, &mut names) };
+    if status != K_AX_ERROR_SUCCESS || names.is_null() {
+        if !names.is_null() {
+            unsafe { CFRelease(names as CFTypeRef) };
+        }
+        return None;
+    }
+
+    let array: CFArray<CFString> = unsafe { CFArray::wrap_under_create_rule(names) };
+    Some(array.iter().map(|name| name.to_string()).collect())
 }
 
 pub struct ApiDisabled;
@@ -188,25 +348,30 @@ fn read_string_attribute(element: &AxElement, attribute: &str) -> AttributeRead 
         }
         return match status {
             K_AX_ERROR_API_DISABLED => AttributeRead::ApiDisabled,
-            K_AX_ERROR_NO_VALUE => AttributeRead::Empty,
+            K_AX_ERROR_NO_VALUE => AttributeRead::Empty(status),
             K_AX_ERROR_ATTRIBUTE_UNSUPPORTED | K_AX_ERROR_NOT_IMPLEMENTED => {
-                AttributeRead::Unsupported
+                AttributeRead::Unsupported(status)
             }
             // Anything else (invalid element, cannot complete, timeout) means we
             // learned nothing about this control, so let the next layer try.
-            _ => AttributeRead::Unsupported,
+            _ => AttributeRead::Unsupported(status),
         };
     }
 
     if unsafe { CFGetTypeID(value) } != CFString::type_id() {
         unsafe { CFRelease(value) };
-        return AttributeRead::Unsupported;
+        // The attribute exists but is not a string. Reported as unsupported so
+        // the next layer runs; the sentinel status keeps it distinguishable from
+        // a real AX error in the log.
+        return AttributeRead::Unsupported(WRONG_TYPE_STATUS);
     }
 
     // wrap_under_create_rule takes ownership of the +1 retain from Copy…
     let text = unsafe { CFString::wrap_under_create_rule(value as CFStringRef) }.to_string();
     if text.is_empty() {
-        AttributeRead::Empty
+        // Success, but the control reports an empty selection — a different fact
+        // from `kAXErrorNoValue`, and worth telling apart in the diagnostic.
+        AttributeRead::Empty(K_AX_ERROR_SUCCESS)
     } else {
         AttributeRead::Text(text)
     }

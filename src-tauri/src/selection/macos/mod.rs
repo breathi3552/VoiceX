@@ -10,8 +10,9 @@ use crate::selection::{
     normalize_text, SelectionError, SelectionOutcome, SelectionRequest, SelectionSource,
     Sensitivity,
 };
+use crate::tts::log_event;
 
-use ax::{AttributeRead, FocusedElement};
+use ax::{AttributeRead, FocusedElement, SelectionAttributes};
 
 pub fn read_selection(request: &SelectionRequest) -> Result<SelectionOutcome, SelectionError> {
     let started = Instant::now();
@@ -73,23 +74,30 @@ pub fn read_selection(request: &SelectionRequest) -> Result<SelectionOutcome, Se
         }
         sensitivity = element.sensitivity();
 
-        match element.selected_text() {
-            AttributeRead::Text(raw) => {
-                let text = normalize_text(&raw);
-                if !text.is_empty() {
-                    return finish(text, SelectionSource::Ax, sensitivity, None);
-                }
-                ax_reported_empty = true;
-            }
-            AttributeRead::Empty => ax_reported_empty = true,
-            AttributeRead::ApiDisabled => return Err(SelectionError::PermissionDenied),
-            AttributeRead::Unsupported => {
-                log::debug!(
-                    "AXSelectedText unsupported for role {:?}; falling back",
-                    element.role()
-                );
+        let read = element.selected_text();
+
+        // Fast path first: when the Accessibility layer hands over text there is
+        // nothing left to diagnose, and the probe below costs another round trip.
+        if let AttributeRead::Text(raw) = &read {
+            let text = normalize_text(raw);
+            if !text.is_empty() {
+                log_ax_probe(element, &read, None);
+                return finish(text, SelectionSource::Ax, sensitivity, None);
             }
         }
+
+        // Everything from here on is a fallback, so spend the extra call: which
+        // attributes the element advertises is what decides whether the phase-1
+        // range layer can help this application at all (plan §5).
+        log_ax_probe(element, &read, Some(element.selection_attributes()));
+
+        match read {
+            AttributeRead::Text(_) | AttributeRead::Empty(_) => ax_reported_empty = true,
+            AttributeRead::ApiDisabled => return Err(SelectionError::PermissionDenied),
+            AttributeRead::Unsupported(_) => {}
+        }
+    } else {
+        log_event("selection_ax", &[("focused", "none".to_string())]);
     }
 
     if !request.allow_clipboard_fallback {
@@ -129,4 +137,38 @@ pub fn read_selection(request: &SelectionRequest) -> Result<SelectionOutcome, Se
         sensitivity,
         Some(copied.restored),
     )
+}
+
+/// Record what the Accessibility layer said about the focused control.
+///
+/// Diagnostic only — no decision reads this. It exists because "AX did not
+/// return text" hides several very different situations, and phase 1 needs to
+/// know which one each application is in before deciding whether a range layer
+/// is worth building (plan §5). `attributes` is `None` on the success path,
+/// where the extra round trip would buy nothing.
+///
+/// Roles and attribute names are control metadata, never content, so this is
+/// safe at the ordinary log level under §3.4.
+fn log_ax_probe(
+    element: &FocusedElement,
+    read: &AttributeRead,
+    attributes: Option<SelectionAttributes>,
+) {
+    let mut fields = vec![
+        ("role", element.role().unwrap_or_default().to_string()),
+        ("subrole", element.subrole().unwrap_or_default().to_string()),
+        ("attr", read.kind().to_string()),
+        ("status", read.status().to_string()),
+    ];
+    if let Some(attributes) = attributes {
+        fields.push(("enumerated", attributes.enumerated.to_string()));
+        fields.push(("has_sel_text", attributes.selected_text.to_string()));
+        fields.push(("has_sel_range", attributes.selected_text_range.to_string()));
+        fields.push((
+            "has_marker_range",
+            attributes.selected_text_marker_range.to_string(),
+        ));
+        fields.push(("has_value", attributes.value.to_string()));
+    }
+    log_event("selection_ax", &fields);
 }
