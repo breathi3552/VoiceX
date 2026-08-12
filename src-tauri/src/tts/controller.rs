@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
-use tauri::AppHandle;
+use tauri::{AppHandle, Emitter};
 
 use super::volcengine::{self, VolcengineBackend, VolcengineConfig};
 use super::{
@@ -315,6 +315,11 @@ impl TtsController {
             Some(settings) => voice_request(&settings, text),
             None => TtsRequest::plain(text),
         };
+        // Tell the settings page when it ends, so its button can be one toggle
+        // rather than a separate Preview and Stop. Before the delegate existed
+        // there was no end event to report, which is why it was two buttons.
+        self.spawn_preview_watcher();
+
         backend.start(request, token).inspect_err(|err| {
             log_event(
                 "speak_err",
@@ -324,6 +329,25 @@ impl TtsController {
                 ],
             );
         })
+    }
+
+    /// Emit `tts:preview_ended` once the session goes idle.
+    ///
+    /// The preview deliberately has no HUD — the user is looking at the settings
+    /// page — so this is the only signal the page can act on.
+    fn spawn_preview_watcher(&self) {
+        let Some(app) = self.app() else { return };
+        let session = self.inner.session.clone();
+
+        thread::Builder::new()
+            .name("voicex-tts-preview".to_string())
+            .spawn(move || {
+                while session.is_active() {
+                    thread::sleep(HUD_POLL);
+                }
+                let _ = app.emit("tts:preview_ended", ());
+            })
+            .expect("failed to spawn the preview watcher");
     }
 
     /// The read-selection hotkey fired.

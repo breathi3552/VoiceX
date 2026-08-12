@@ -9,13 +9,17 @@ use std::time::Instant;
 
 use crate::foreground_app;
 use crate::selection::{
-    normalize_text, SelectionError, SelectionOutcome, SelectionRequest, SelectionSource,
+    normalize_text, SelectionError, SelectionOutcome, SelectionProbe, SelectionRequest,
+    SelectionSource,
 };
 use crate::tts::log_event;
 
 use ax::{AttributeRead, FocusedElement, SelectionAttributes};
 
-pub fn read_selection(request: &SelectionRequest) -> Result<SelectionOutcome, SelectionError> {
+pub fn read_selection(
+    request: &SelectionRequest,
+    probe: &mut SelectionProbe,
+) -> Result<SelectionOutcome, SelectionError> {
     let started = Instant::now();
 
     // Freeze the foreground application before touching anything else, so every
@@ -27,6 +31,8 @@ pub fn read_selection(request: &SelectionRequest) -> Result<SelectionOutcome, Se
     let app_bundle_id = app_info.bundle_id.clone();
     let app_name = app_info.display_name.clone();
     let app_pid = app_info.process_id;
+    probe.app_bundle_id = app_bundle_id.clone();
+    probe.app_name = app_name.clone();
 
     let finish = |text: String, source: SelectionSource, clipboard_restored: Option<bool>| {
         Ok(SelectionOutcome {
@@ -59,6 +65,7 @@ pub fn read_selection(request: &SelectionRequest) -> Result<SelectionOutcome, Se
     // healthy application is never poked.
     if focused.is_none() && ax::needs_manual_accessibility(app_bundle_id.as_deref()) {
         if enable_manual_accessibility_once(app_pid) {
+            probe.enabled_manual_accessibility = true;
             focused = FocusedElement::read().unwrap_or(None);
             log_event(
                 "selection_ax_enabled",
@@ -78,7 +85,12 @@ pub fn read_selection(request: &SelectionRequest) -> Result<SelectionOutcome, Se
     let mut ax_reported_empty = false;
 
     if let Some(element) = focused.as_ref() {
+        probe.focused_role = element.role().map(str::to_string);
+        probe.focused_subrole = element.subrole().map(str::to_string);
+
         let read = element.selected_text();
+        probe.ax_attribute = Some(read.kind().to_string());
+        probe.ax_status = Some(read.status());
 
         // Fast path first: when the Accessibility layer hands over text there is
         // nothing left to diagnose, and the probe below costs another round trip.
@@ -93,7 +105,13 @@ pub fn read_selection(request: &SelectionRequest) -> Result<SelectionOutcome, Se
         // Everything from here on is a fallback, so spend the extra call: which
         // attributes the element advertises is what decides whether the phase-1
         // range layer can help this application at all (plan §5).
-        log_ax_probe(element, &read, Some(element.selection_attributes()));
+        let attributes = element.selection_attributes();
+        if attributes.enumerated {
+            probe.advertises_selected_text = Some(attributes.selected_text);
+            probe.advertises_selected_text_range = Some(attributes.selected_text_range);
+            probe.advertises_marker_range = Some(attributes.selected_text_marker_range);
+        }
+        log_ax_probe(element, &read, Some(attributes));
 
         match read {
             AttributeRead::Text(_) | AttributeRead::Empty(_) => ax_reported_empty = true,
@@ -121,6 +139,7 @@ pub fn read_selection(request: &SelectionRequest) -> Result<SelectionOutcome, Se
         return Err(SelectionError::SecureInput);
     }
 
+    probe.used_clipboard_fallback = true;
     let copied = match clipboard::read_via_copy(&request.app, app_pid) {
         Ok(copied) => copied,
         // A copy that changes nothing is indistinguishable from an empty

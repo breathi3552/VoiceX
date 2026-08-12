@@ -1,6 +1,7 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
+import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 import { NButton, NInput, NSelect, NSlider, NSwitch } from 'naive-ui'
 import { useI18n } from 'vue-i18n'
 import { useSettingsStore } from '../stores/settings'
@@ -36,6 +37,17 @@ const hotkeyStatus = ref<ReadSelectionStatus | null>(null)
 const isRecording = ref(false)
 const previewLoading = ref(false)
 const previewError = ref('')
+// Speech is in progress. Known because the backend reports the end now; before
+// the delegate existed there was no such event, which is why this used to be
+// two buttons instead of one toggle.
+const previewSpeaking = ref(false)
+let unlistenPreviewEnded: UnlistenFn | null = null
+
+const DIAGNOSE_COUNTDOWN_S = 5
+const diagnoseCountdown = ref(0)
+const diagnoseReport = ref<string>('')
+const diagnoseError = ref('')
+let diagnoseTimer: number | null = null
 const showAdvanced = ref(false)
 
 const ttsEnabled = computed({
@@ -208,7 +220,12 @@ async function loadVoices(provider: ProviderValue = settingsStore.settings.ttsPr
   }
 }
 
-async function runPreview() {
+async function togglePreview() {
+  if (previewSpeaking.value) {
+    await stopPreview()
+    return
+  }
+
   previewLoading.value = true
   previewError.value = ''
   try {
@@ -216,18 +233,61 @@ async function runPreview() {
     // save has to land before the preview starts or it auditions stale values.
     await settingsStore.forceSaveSettings()
     await invoke('preview_tts', { text: t('reading.previewText') })
+    previewSpeaking.value = true
   } catch (error) {
     previewError.value = error instanceof Error ? error.message : String(error)
+    previewSpeaking.value = false
   } finally {
     previewLoading.value = false
   }
 }
 
 async function stopPreview() {
+  // Cleared here rather than waiting for the event: the button must respond to
+  // the click, not to the round trip.
+  previewSpeaking.value = false
   try {
     await invoke('stop_tts')
   } catch (error) {
     console.error('Failed to stop speech', error)
+  }
+}
+
+async function runDiagnostics() {
+  diagnoseError.value = ''
+  diagnoseReport.value = ''
+  // Clicking the button puts VoiceX in front, so a read now would only ever
+  // find our own window. Count down while the user switches back.
+  diagnoseCountdown.value = DIAGNOSE_COUNTDOWN_S
+  diagnoseTimer = window.setInterval(() => {
+    diagnoseCountdown.value -= 1
+    if (diagnoseCountdown.value <= 0 && diagnoseTimer !== null) {
+      clearInterval(diagnoseTimer)
+      diagnoseTimer = null
+    }
+  }, 1000)
+
+  try {
+    const report = await invoke('diagnose_selection', {
+      delayMs: DIAGNOSE_COUNTDOWN_S * 1000
+    })
+    diagnoseReport.value = JSON.stringify(report, null, 2)
+  } catch (error) {
+    diagnoseError.value = error instanceof Error ? error.message : String(error)
+  } finally {
+    diagnoseCountdown.value = 0
+    if (diagnoseTimer !== null) {
+      clearInterval(diagnoseTimer)
+      diagnoseTimer = null
+    }
+  }
+}
+
+async function copyDiagnostics() {
+  try {
+    await navigator.clipboard.writeText(diagnoseReport.value)
+  } catch (error) {
+    console.error('Failed to copy the report', error)
   }
 }
 
@@ -240,6 +300,18 @@ onMounted(async () => {
     console.error('Failed to read the reading hotkey status', error)
   }
   await loadVoices()
+  unlistenPreviewEnded = await listen('tts:preview_ended', () => {
+    previewSpeaking.value = false
+  })
+})
+
+onBeforeUnmount(() => {
+  unlistenPreviewEnded?.()
+  unlistenPreviewEnded = null
+  if (diagnoseTimer !== null) {
+    clearInterval(diagnoseTimer)
+    diagnoseTimer = null
+  }
 })
 </script>
 
@@ -444,18 +516,15 @@ onMounted(async () => {
             <div class="field-note">{{ t('reading.previewNote') }}</div>
           </div>
           <div class="field-control end">
-            <NButton size="small" :disabled="!isMacOS" @click="stopPreview">
-              {{ t('reading.previewStop') }}
-            </NButton>
             <NButton
               :loading="previewLoading"
-              :disabled="!isMacOS"
-              type="primary"
+              :disabled="!isMacOS && !isVolcengine"
+              :type="previewSpeaking ? 'default' : 'primary'"
               secondary
               size="small"
-              @click="runPreview"
+              @click="togglePreview"
             >
-              {{ t('reading.preview') }}
+              {{ previewSpeaking ? t('reading.previewStop') : t('reading.preview') }}
             </NButton>
           </div>
         </div>
@@ -463,6 +532,46 @@ onMounted(async () => {
         <div v-if="previewError" class="warning-box">
           {{ t('reading.previewFailed') }} — {{ previewError }}
         </div>
+      </div>
+    </div>
+
+    <div v-if="settingsStore.settings.enableDiagnostics" class="surface-card asr-card">
+      <div class="card-header">
+        <div class="card-title">{{ t('reading.diagnostics') }}</div>
+        <div class="card-sub">{{ t('reading.diagnosticsSub') }}</div>
+      </div>
+      <div class="field-list">
+        <div class="field-row align-start">
+          <div class="field-text">
+            <div class="field-label">{{ t('reading.diagnosticsRun') }}</div>
+            <div class="field-note">{{ t('reading.diagnosticsHint') }}</div>
+          </div>
+          <div class="field-control end">
+            <NButton
+              :loading="diagnoseCountdown > 0"
+              :disabled="diagnoseCountdown > 0"
+              size="small"
+              @click="runDiagnostics"
+            >
+              {{
+                diagnoseCountdown > 0
+                  ? t('reading.diagnosticsCountdown', { seconds: diagnoseCountdown })
+                  : t('reading.diagnosticsRun')
+              }}
+            </NButton>
+            <NButton
+              v-if="diagnoseReport"
+              quaternary
+              size="small"
+              @click="copyDiagnostics"
+            >
+              {{ t('common.copy') }}
+            </NButton>
+          </div>
+        </div>
+
+        <pre v-if="diagnoseReport" class="diagnostics-report">{{ diagnoseReport }}</pre>
+        <div v-if="diagnoseError" class="warning-box">{{ diagnoseError }}</div>
       </div>
     </div>
 
@@ -559,5 +668,20 @@ onMounted(async () => {
 
 .advanced-body {
   margin-top: var(--spacing-md);
+}
+
+.diagnostics-report {
+  margin: 0;
+  padding: 12px 14px;
+  border-radius: 12px;
+  background: var(--color-bg-tertiary);
+  border: 1px solid var(--color-border);
+  font-family: 'SF Mono', 'Menlo', monospace;
+  font-size: var(--font-xs);
+  line-height: 1.55;
+  color: var(--color-text-secondary);
+  max-height: 320px;
+  overflow: auto;
+  white-space: pre;
 }
 </style>

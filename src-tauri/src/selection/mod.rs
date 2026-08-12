@@ -40,6 +40,40 @@ impl SelectionSource {
     }
 }
 
+/// What the reader observed on its way through, successful or not.
+///
+/// Exists because the interesting detail — which control had focus, what it
+/// advertised, which path was taken — only ever reached the structured log,
+/// which means it is only visible to someone who launched the app from a
+/// terminal. A failed read is exactly when that detail matters, so this is
+/// collected on every path including the early returns.
+///
+/// Platform types never appear here: the macOS reader flattens its `AXError`
+/// and attribute list into plain fields, so a future Windows reader can fill
+/// the same shape.
+#[derive(Debug, Default, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SelectionProbe {
+    pub app_bundle_id: Option<String>,
+    pub app_name: Option<String>,
+    pub focused_role: Option<String>,
+    pub focused_subrole: Option<String>,
+    /// `text` | `empty` | `unsupported` | `api_disabled`, or `None` when there
+    /// was no focused element to ask.
+    pub ax_attribute: Option<String>,
+    /// The raw platform status behind `ax_attribute`. Several very different
+    /// causes collapse into one kind, and only this tells them apart.
+    pub ax_status: Option<i32>,
+    /// Which selection attributes the control advertises. `None` means we never
+    /// got as far as asking.
+    pub advertises_selected_text: Option<bool>,
+    pub advertises_selected_text_range: Option<bool>,
+    pub advertises_marker_range: Option<bool>,
+    /// We asked this application to build its accessibility tree.
+    pub enabled_manual_accessibility: bool,
+    pub used_clipboard_fallback: bool,
+}
+
 /// A successful selection read.
 #[derive(Debug, Clone)]
 pub struct SelectionOutcome {
@@ -123,10 +157,7 @@ pub struct SelectionRequest {
     pub allow_clipboard_fallback: bool,
 }
 
-type Job = (
-    SelectionRequest,
-    SyncSender<Result<SelectionOutcome, SelectionError>>,
-);
+type Job = (SelectionRequest, SyncSender<SelectionReport>);
 
 fn worker() -> &'static Sender<Job> {
     static WORKER: OnceLock<Sender<Job>> = OnceLock::new();
@@ -144,19 +175,28 @@ fn worker() -> &'static Sender<Job> {
     })
 }
 
-fn read_selection_on_worker(
-    request: &SelectionRequest,
-) -> Result<SelectionOutcome, SelectionError> {
+fn read_selection_on_worker(request: &SelectionRequest) -> SelectionReport {
     #[cfg(target_os = "macos")]
     {
-        macos::read_selection(request)
+        let mut probe = SelectionProbe::default();
+        let outcome = macos::read_selection(request, &mut probe);
+        SelectionReport { outcome, probe }
     }
 
     #[cfg(not(target_os = "macos"))]
     {
         let _ = request;
-        Err(SelectionError::PlatformUnsupported)
+        SelectionReport {
+            outcome: Err(SelectionError::PlatformUnsupported),
+            probe: SelectionProbe::default(),
+        }
     }
+}
+
+/// A read plus everything observed while performing it.
+pub struct SelectionReport {
+    pub outcome: Result<SelectionOutcome, SelectionError>,
+    pub probe: SelectionProbe,
 }
 
 /// Read the current selection from the foreground application.
@@ -164,13 +204,26 @@ fn read_selection_on_worker(
 /// Blocking. Must not be called from the main thread: the macOS implementation
 /// hops to the main thread for AppKit queries and would deadlock.
 pub fn read_selection(request: SelectionRequest) -> Result<SelectionOutcome, SelectionError> {
+    read_selection_reporting(request).outcome
+}
+
+/// Read, and also report what was observed on the way.
+///
+/// Same code path as [`read_selection`] — deliberately, since a diagnostic that
+/// exercises a parallel implementation proves nothing about the real one.
+pub fn read_selection_reporting(request: SelectionRequest) -> SelectionReport {
     let (reply_tx, reply_rx) = mpsc::sync_channel(1);
-    worker()
-        .send((request, reply_tx))
-        .map_err(|_| SelectionError::Internal("selection worker is gone".to_string()))?;
+    let gone = |message: &str| SelectionReport {
+        outcome: Err(SelectionError::Internal(message.to_string())),
+        probe: SelectionProbe::default(),
+    };
+
+    if worker().send((request, reply_tx)).is_err() {
+        return gone("selection worker is gone");
+    }
     reply_rx
         .recv()
-        .map_err(|_| SelectionError::Internal("selection worker dropped the request".to_string()))?
+        .unwrap_or_else(|_| gone("selection worker dropped the request"))
 }
 
 /// Minimal normalization: CRLF/CR to LF, then trim.
@@ -191,6 +244,30 @@ mod tests {
     #[test]
     fn normalization_folds_line_endings_and_trims() {
         assert_eq!(normalize_text("  hello\r\nworld\r  "), "hello\nworld");
+    }
+
+    #[test]
+    fn the_probe_reports_no_text_only_facts_about_the_read() {
+        // The report is meant to be pasted into a bug report. Nothing derived
+        // from what the user had selected may appear in it — the length lives
+        // on the outcome, and the text itself never leaves the process.
+        let probe = SelectionProbe {
+            app_bundle_id: Some("com.example.app".to_string()),
+            focused_role: Some("AXTextArea".to_string()),
+            ax_attribute: Some("empty".to_string()),
+            ax_status: Some(-25212),
+            used_clipboard_fallback: true,
+            ..SelectionProbe::default()
+        };
+        let json = serde_json::to_string(&probe).unwrap();
+
+        // Field names are what someone reads in a pasted report and what the
+        // settings page renders, so renaming one is a breaking change.
+        assert!(json.contains("\"appBundleId\":\"com.example.app\""), "{json}");
+        assert!(json.contains("\"focusedRole\":\"AXTextArea\""), "{json}");
+        assert!(json.contains("\"axStatus\":-25212"), "{json}");
+        assert!(json.contains("\"usedClipboardFallback\":true"), "{json}");
+        assert!(!json.contains("text\":\""), "no selected text may appear: {json}");
     }
 
     #[test]

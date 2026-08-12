@@ -93,6 +93,90 @@ pub async fn apply_read_selection_hotkey(
     Ok(manager.read_selection_status())
 }
 
+/// One diagnostic read, reported in full.
+///
+/// Plan §4.2 calls this L2b: the same `SelectionReader` the hotkey uses, run
+/// under VoiceX's own TCC identity. That identity is the point — macOS grants
+/// Accessibility per process, so a standalone probe passing says nothing about
+/// whether the installed app can read anything.
+///
+/// Deliberately carries no text, only its length. This is meant to be pasted
+/// into a bug report, and what someone had selected is their business.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SelectionDiagnostics {
+    pub ok: bool,
+    /// Stable error code, matching what the structured log and HUD use.
+    pub error: Option<String>,
+    pub detail: Option<String>,
+    pub source: Option<String>,
+    pub chars: Option<usize>,
+    pub elapsed_ms: Option<u64>,
+    pub clipboard_restored: Option<bool>,
+    /// Settings state, so a report explains itself without a follow-up question.
+    pub clipboard_fallback_allowed: bool,
+    pub accessibility: bool,
+    pub input_monitoring: bool,
+    pub probe: crate::selection::SelectionProbe,
+}
+
+/// Read the selection once and report everything observed.
+///
+/// `delay_ms` exists because clicking the button makes VoiceX frontmost, and a
+/// read then finds its own window — the answer would always be `focus_is_self`.
+/// The caller counts down while the user switches back to the application they
+/// actually want diagnosed.
+#[tauri::command]
+pub async fn diagnose_selection(
+    app: tauri::AppHandle,
+    delay_ms: Option<u64>,
+) -> Result<SelectionDiagnostics, String> {
+    let delay = delay_ms.unwrap_or(0).min(30_000);
+    tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+
+    let settings = crate::storage::get_settings().map_err(|err| err.to_string())?;
+    let allow_clipboard_fallback = settings.tts_clipboard_fallback;
+
+    let report = tauri::async_runtime::spawn_blocking(move || {
+        crate::selection::read_selection_reporting(crate::selection::SelectionRequest {
+            app,
+            allow_clipboard_fallback,
+        })
+    })
+    .await
+    .map_err(|err| format!("Diagnostic read failed to run: {err}"))?;
+
+    let permission = crate::hotkey::HotkeyPermissionStatus::detect();
+    let mut diagnostics = SelectionDiagnostics {
+        ok: report.outcome.is_ok(),
+        error: None,
+        detail: None,
+        source: None,
+        chars: None,
+        elapsed_ms: None,
+        clipboard_restored: None,
+        clipboard_fallback_allowed: allow_clipboard_fallback,
+        accessibility: permission.accessibility,
+        input_monitoring: permission.input_monitoring,
+        probe: report.probe,
+    };
+
+    match report.outcome {
+        Ok(outcome) => {
+            diagnostics.source = Some(outcome.source.as_str().to_string());
+            diagnostics.chars = Some(outcome.text.chars().count());
+            diagnostics.elapsed_ms = Some(outcome.elapsed_ms);
+            diagnostics.clipboard_restored = outcome.clipboard_restored;
+        }
+        Err(err) => {
+            diagnostics.error = Some(err.code().to_string());
+            diagnostics.detail = Some(err.to_string());
+        }
+    }
+
+    Ok(diagnostics)
+}
+
 /// Current state of the reading binding. The settings page asks on mount
 /// because the dictation key may have changed since it last applied one.
 #[tauri::command]

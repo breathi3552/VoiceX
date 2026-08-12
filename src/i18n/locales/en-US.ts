@@ -198,6 +198,11 @@ const enUS = {
     volcSpeakerNote: 'Seed-TTS 2.0 has its own voices; classic Doubao voices do not work here. Type any other voice id and press Enter, then check it with Preview.',
     cloudPrivacy: 'With a cloud engine, the text you select is sent to that provider to be synthesized. Neither reading history nor synthesized audio is stored.',
     hotkeySystemNote: 'Independent of the built-in macOS Speak Selection (Option + Esc) — both can be used.',
+    diagnostics: 'Selection diagnostics',
+    diagnosticsSub: 'Run this when an application cannot be read, and send the report',
+    diagnosticsRun: 'Run diagnostics',
+    diagnosticsHint: 'After clicking, switch back to the target application and select some text within 5 seconds. The report describes how the read went and never contains the text itself.',
+    diagnosticsCountdown: 'Reading in {seconds}s…',
     unsupportedPlatform: 'Read selection is not available on this platform yet.'
   },
   sync: {

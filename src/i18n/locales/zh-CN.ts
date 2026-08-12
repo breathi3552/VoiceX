@@ -198,6 +198,11 @@ const zhCN = {
     volcSpeakerNote: 'Seed-TTS 2.0 专属音色，与经典音色不通用。列表里没有的可直接输入音色 ID 后回车，再用试听验证。',
     cloudPrivacy: '使用云端引擎时，你选中的文字会发送给该供应商用于合成。朗读历史与合成音频都不保存。',
     hotkeySystemNote: '与 macOS 自带的「朗读所选内容」（Option + Esc）互不影响，两者可以同时使用。',
+    diagnostics: '取词诊断',
+    diagnosticsSub: '某个应用读不到时，跑一次并把报告贴给开发者',
+    diagnosticsRun: '开始诊断',
+    diagnosticsHint: '点击后请在 5 秒内切回目标应用并选中一段文字。报告只含取词过程的信息，不含你选中的文字。',
+    diagnosticsCountdown: '{seconds} 秒后读取…',
     unsupportedPlatform: '当前平台暂不支持选中朗读。'
   },
   sync: {

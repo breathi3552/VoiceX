@@ -336,6 +336,7 @@ pub fn run() {
             commands::tts::stop_tts,
             commands::tts::apply_read_selection_hotkey,
             commands::tts::read_selection_hotkey_status,
+            commands::tts::diagnose_selection,
             commands::settings::get_settings,
             commands::settings::get_recent_target_apps,
             commands::settings::get_resolved_ui_locale,
