@@ -288,7 +288,11 @@ function setBatchLayoutMode(batchWaveMode: boolean, compactBatchMode: boolean) {
 }
 
 function updateStatus(mode: typeof currentMode) {
+  const wasReading = isReadingMode();
   currentMode = mode;
+  if (wasReading !== isReadingMode()) {
+    renderIntentChip();
+  }
   document.body.classList.remove("recording", "recognizing", "correcting", "error");
 
   switch (mode) {
@@ -794,7 +798,21 @@ function updateCountdown(seconds?: number | null) {
 
 function updateIntent(intent?: string) {
   currentIntent = intent === "translate_en" ? "translate_en" : "assistant";
+  renderIntentChip();
+}
+
+/// The chip labels what the HUD is currently doing.
+///
+/// While reading it must not show a dictation intent: "助手" is left over from
+/// whatever the last dictation did, and reading has no intent of that kind.
+function renderIntentChip() {
   if (!intentChip) return;
+
+  if (isReadingMode()) {
+    intentChip.textContent = t("readingChip");
+    intentChip.classList.remove("translate");
+    return;
+  }
 
   if (currentIntent === "translate_en") {
     intentChip.textContent = t("translateEn");

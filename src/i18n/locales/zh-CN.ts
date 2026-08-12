@@ -642,6 +642,7 @@ const zhCN = {
     recognizing: '正在识别...',
     recording: '正在录音...',
     startRecording: '按下热键开始录音',
+    readingChip: '朗读',
     reading: '正在朗读...',
     readingPrepare: '正在准备朗读...',
     readingNoSelection: '没有选中文字',
