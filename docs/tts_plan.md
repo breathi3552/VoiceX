@@ -449,7 +449,19 @@ Body:    { "user": {"uid": "..."},
 - **播放在应用内做，用 `cpal`**（0.15 已在依赖里，目前仅用于输入设备枚举与采集），加一路输出流 + 环形缓冲。**不用 rodio**：它会锁定自己的 cpal 版本，与现有 0.15 撞版本是实打实的风险。**不走前端 webview 播放**：VoiceX 是托盘应用，主窗口经常关着，把核心功能的音频挂在 webview 生命周期上太脆，音频还要多过一遍 IPC。
 - 现成可复用：`reqwest 0.11` 已带 `stream` feature、`base64 0.22`、`futures-util` 均在依赖里，只需新增 `symphonia`。
 
-**参数映射**：`speech_rate` / `loudness_rate` 对应设置页的语速 / 音量。**火山没有音调参数**——设置页的"音调"是 macOS 本地专有项，选中火山时应隐藏（§5.2 定的形态本就是"先选 Provider，再配置该 Provider 支持的选项"，架构上不用改）。
+**参数映射**：语速走 `speech_rate`（实测可用区间 −50…+100，0 为中性；存储仍是归一化 0–1，由后端映射，`speech_rate = (倍率−1)×100` 正好对齐两端）。**音量不发给 API**，改在播放层做本地增益——即时生效、跨 provider 一致，且不依赖 `loudness_rate` 这个语义未文档化的参数（实测各取值对音频体积无可辨差异）。**火山没有音调参数**，音调因此是 macOS 专有项。
+
+**⚠️ 设置归属决策（2026-08-12 定）：所有合成参数一律按 provider 独立，不区分"共用参数"与"独有参数"。**
+最初的实现把语速/音量/音调放在共享位置、只有音色和凭证按 provider 分开，产品否决了这个划分。理由有二：一是**各引擎的响度与语速基线本就不同**，共享一个值等于逼用户在两个基线之间折中；二是**"共用还是独有"这个分类本身是负担**——每接一家 provider 就要重新争论一次，不如取消。这与 ASR 页早已成立的形态一致（连"语言"都是 `qwen_asr_language` / `google_stt_language_code` 各存一份）。
+
+据此，`AppSettings` 分为三块：
+- **功能级（与引擎无关）**：`ttsEnabled`、`ttsProviderType`、`ttsHotkeyConfig`、`ttsClipboardFallback`。热键与兼容模式属于"取词"，发生在合成之前。
+- **系统语音**：`systemTtsVoiceId`、`systemTtsRate`、`systemTtsVolume`、`systemTtsPitch`
+- **火山**：`volcTtsApiKey`、`volcTtsResourceId`、`volcTtsSpeaker`、`volcTtsRate`、`volcTtsVolume`
+
+原先的 `ttsVoiceId` / `ttsRate` / `ttsVolume` / `ttsPitch` 已改名为 `systemTts*`。**改名会让旧值静默回落默认**（`#[serde(default)]`），当时字段刚落地一天、只有一个用户，成本约等于零；这类改名越晚越贵。
+
+**⚠️ 情感参数：接口无法自证，必须靠听。** Seed-TTS 2.0 宣称支持 `emotion` + `emotion_scale`（0–5）。实测发现：三种放法（`req_params.emotion`、`audio_params.emotion`、`additions`）与**明显非法的取值**（`bogus_emotion_xyz`）全都被静默接受、不报错；而合成本身不确定——同一请求连跑 5 次音频体积极差 3264 字节，大于任何两个情感取值之间的差异。**因此字节比对完全无法判定该参数是否生效**，只能人工试听定案。产品已确认要暴露此设置，且因为技术类文本带情感会很怪，**默认必须为"无情感"**。
 
 **凭证**：与现有 ASR 的 `asr_app_key` / `asr_access_key` **不是同一份**，需在火山方舟控制台的语音合成大模型页面单独获取 API Key。存法与现有 ASR key 一致（`AppSettings` 扁平字段）。
 

@@ -383,29 +383,42 @@ fn load_settings() -> Option<AppSettings> {
     }
 }
 
-/// Build a request carrying the user's voice parameters.
+/// Build a request from the selected provider's own settings.
 ///
-/// Rate and volume are stored normalized (0..=1) and go straight through; each
-/// backend maps them onto its own scale. Pitch is macOS-only — Volcengine has
-/// no such parameter and ignores it (plan §5.4).
+/// Every synthesis parameter is per provider, not just the voice id. Engines
+/// differ in baseline speed and loudness, so one shared value would force a
+/// compromise between them — and keeping them separate means adding a provider
+/// never reopens the question of which settings are shared.
 ///
-/// The voice id is **per provider**: a macOS voice identifier means nothing to
-/// a cloud provider and vice versa, so they are stored separately and picked
-/// here. An empty id means "backend default", which is not the same as a voice
+/// Rate and volume are stored normalized (0..=1) on both sides and each backend
+/// maps them onto its own scale. Pitch exists only for the system voice, so a
+/// cloud request carries `None` rather than a value that would be dropped.
+///
+/// An empty voice id means "backend default", which is not the same as a voice
 /// literally named "".
 fn voice_request(settings: &AppSettings, text: String) -> TtsRequest {
-    let voice = if settings.tts_provider_type == PROVIDER_VOLCENGINE {
-        settings.volc_tts_speaker.clone()
+    let (voice, rate, volume, pitch) = if settings.tts_provider_type == PROVIDER_VOLCENGINE {
+        (
+            settings.volc_tts_speaker.clone(),
+            settings.volc_tts_rate,
+            settings.volc_tts_volume,
+            None,
+        )
     } else {
-        settings.tts_voice_id.clone()
+        (
+            settings.system_tts_voice_id.clone(),
+            settings.system_tts_rate,
+            settings.system_tts_volume,
+            Some(settings.system_tts_pitch),
+        )
     };
 
     TtsRequest {
         text,
         voice: Some(voice).filter(|id| !id.trim().is_empty()),
-        rate: Some(settings.tts_rate),
-        volume: Some(settings.tts_volume),
-        pitch: Some(settings.tts_pitch),
+        rate: Some(rate),
+        volume: Some(volume),
+        pitch,
     }
 }
 
@@ -446,10 +459,10 @@ mod tests {
     #[test]
     fn an_unset_voice_means_engine_default_not_a_voice_named_empty() {
         let mut settings = AppSettings::default();
-        assert!(settings.tts_voice_id.is_empty());
+        assert!(settings.system_tts_voice_id.is_empty());
         assert_eq!(voice_request(&settings, "hi".to_string()).voice, None);
 
-        settings.tts_voice_id = "com.apple.voice.compact.zh-CN.Tingting".to_string();
+        settings.system_tts_voice_id = "com.apple.voice.compact.zh-CN.Tingting".to_string();
         assert_eq!(
             voice_request(&settings, "hi".to_string()).voice.as_deref(),
             Some("com.apple.voice.compact.zh-CN.Tingting")
@@ -465,6 +478,41 @@ mod tests {
         assert_eq!(request.rate, Some(0.5), "0.5 is the engine's 1x mark");
         assert_eq!(request.volume, Some(1.0));
         assert_eq!(request.pitch, Some(1.0));
+    }
+
+    #[test]
+    fn each_provider_speaks_from_its_own_settings() {
+        // The whole point of splitting them: tuning one engine must not move
+        // the other. A shared value would force a compromise between engines
+        // whose baseline speed and loudness differ.
+        let mut settings = AppSettings::default();
+        settings.system_tts_voice_id = "com.apple.voice.compact.zh-CN.Tingting".to_string();
+        settings.system_tts_rate = 0.9;
+        settings.system_tts_volume = 0.4;
+        settings.volc_tts_speaker = "zh_male_liufei_uranus_bigtts".to_string();
+        settings.volc_tts_rate = 0.3;
+        settings.volc_tts_volume = 1.0;
+
+        settings.tts_provider_type = "system".to_string();
+        let local = voice_request(&settings, "hi".to_string());
+        assert_eq!(local.voice.as_deref(), Some("com.apple.voice.compact.zh-CN.Tingting"));
+        assert_eq!(local.rate, Some(0.9));
+        assert_eq!(local.volume, Some(0.4));
+
+        settings.tts_provider_type = "volcengine".to_string();
+        let cloud = voice_request(&settings, "hi".to_string());
+        assert_eq!(cloud.voice.as_deref(), Some("zh_male_liufei_uranus_bigtts"));
+        assert_eq!(cloud.rate, Some(0.3));
+        assert_eq!(cloud.volume, Some(1.0));
+    }
+
+    #[test]
+    fn a_cloud_request_carries_no_pitch_at_all() {
+        // Sending a pitch no cloud provider implements would be a value the
+        // backend silently drops; `None` says so in the type instead.
+        let mut settings = AppSettings::default();
+        settings.tts_provider_type = "volcengine".to_string();
+        assert_eq!(voice_request(&settings, "hi".to_string()).pitch, None);
     }
 
     #[test]

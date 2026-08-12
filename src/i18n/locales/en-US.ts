@@ -171,7 +171,7 @@ const enUS = {
     pressHotkey: 'Press the hotkey...',
     hotkeyConflict: 'This is also the recording hotkey, so reading is disabled. Change one of them.',
     voice: 'Voice',
-    voiceSub: 'Rate, pitch and volume apply to everything spoken',
+    voiceSub: 'These belong to the selected engine — each engine keeps its own',
     voiceLabel: 'Voice',
     voiceDefault: 'System default',
     voiceNote: 'Pick a Chinese voice for Chinese text — the default voice on an English system reads it poorly.',

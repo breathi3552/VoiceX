@@ -165,23 +165,31 @@ pub struct AppSettings {
     pub hold_threshold_ms: u32,
     pub max_recording_minutes: u32,
 
-    // Selected-text reading (TTS)
+    // Selected-text reading (TTS) — settings that belong to the feature rather
+    // than to any engine. Everything an engine can be told to do lives in that
+    // engine's own block below, including rate and volume: providers differ in
+    // baseline speed and loudness, so a shared value would force a compromise
+    // between them, and the split removes the "is this shared or specific?"
+    // question entirely for every provider added later.
     pub tts_enabled: bool,
     pub tts_provider_type: String, // "system" | "volcengine"
-    /// Backend voice identifier; empty means "whatever the engine picks".
-    pub tts_voice_id: String,
-    /// Normalized 0.0..=1.0 speaking rate. The UI shows a 0.5x–2x multiplier
-    /// around the engine default, which is 0.5 on this scale.
-    pub tts_rate: f32,
-    pub tts_volume: f32,
-    /// Pitch multiplier in the engine's own 0.5..=2.0 scale; 1.0 is neutral.
-    pub tts_pitch: f32,
     /// `None` means the built-in default binding (Option+Command+R).
     pub tts_hotkey_config: Option<String>,
     /// Compatibility mode: fall back to a synthetic Cmd-C when the
     /// Accessibility path comes up empty. Turning it off loses Safari and
     /// VS Code (plan §5.1); every other P0 application reads via AX.
     pub tts_clipboard_fallback: bool,
+
+    // TTS Provider: macOS system voice
+    /// Voice identifier; empty means "whatever the engine picks".
+    pub system_tts_voice_id: String,
+    /// Normalized 0.0..=1.0 speaking rate. The UI shows a 0.5x–2x multiplier
+    /// around the engine default, which is 0.5 on this scale.
+    pub system_tts_rate: f32,
+    pub system_tts_volume: f32,
+    /// Pitch multiplier in the engine's own 0.5..=2.0 scale; 1.0 is neutral.
+    /// No cloud provider has an equivalent, which is why it lives here.
+    pub system_tts_pitch: f32,
 
     // TTS Provider: Volcengine (Doubao Seed-TTS 2.0)
     /// Separate from the ASR credentials — the speech synthesis models issue
@@ -190,6 +198,10 @@ pub struct AppSettings {
     /// The model string, not the console's instance id (plan §5.4).
     pub volc_tts_resource_id: String,
     pub volc_tts_speaker: String,
+    /// Normalized like the system voice's, then mapped onto the provider's own
+    /// -50..=100 scale by the backend.
+    pub volc_tts_rate: f32,
+    pub volc_tts_volume: f32,
 
     // Input
     pub input_device_uid: Option<String>,
@@ -390,17 +402,20 @@ impl Default for AppSettings {
 
             tts_enabled: true,
             tts_provider_type: "system".to_string(),
-            tts_voice_id: String::new(),
-            // 0.5 is AVSpeechUtteranceDefaultSpeechRate, i.e. the 1x mark.
-            tts_rate: 0.5,
-            tts_volume: 1.0,
-            tts_pitch: 1.0,
             tts_hotkey_config: None,
             tts_clipboard_fallback: true,
+
+            system_tts_voice_id: String::new(),
+            // 0.5 is AVSpeechUtteranceDefaultSpeechRate, i.e. the 1x mark.
+            system_tts_rate: 0.5,
+            system_tts_volume: 1.0,
+            system_tts_pitch: 1.0,
 
             volc_tts_api_key: String::new(),
             volc_tts_resource_id: crate::tts::volcengine::DEFAULT_RESOURCE_ID.to_string(),
             volc_tts_speaker: crate::tts::volcengine::default_speaker().to_string(),
+            volc_tts_rate: 0.5,
+            volc_tts_volume: 1.0,
 
             input_device_uid: None,
             text_injection_mode: "pasteboard".to_string(),
@@ -1027,23 +1042,27 @@ mod tests {
         // to the camelCase names the frontend store reads.
         let mut settings = AppSettings::default();
         settings.tts_enabled = false;
-        settings.tts_voice_id = "com.apple.voice.compact.zh-CN.Tingting".to_string();
-        settings.tts_rate = 0.75;
-        settings.tts_pitch = 1.4;
         settings.tts_hotkey_config = Some("83|2304|0".to_string());
         settings.tts_clipboard_fallback = false;
+        settings.system_tts_voice_id = "com.apple.voice.compact.zh-CN.Tingting".to_string();
+        settings.system_tts_rate = 0.75;
+        settings.system_tts_pitch = 1.4;
+        settings.volc_tts_speaker = "zh_male_liufei_uranus_bigtts".to_string();
+        settings.volc_tts_rate = 0.3;
 
         let json = serde_json::to_string(&settings).unwrap();
         let blob: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(blob["ttsEnabled"], false);
-        assert_eq!(blob["ttsVoiceId"], "com.apple.voice.compact.zh-CN.Tingting");
         assert_eq!(blob["ttsHotkeyConfig"], "83|2304|0");
         assert_eq!(blob["ttsClipboardFallback"], false);
+        assert_eq!(blob["systemTtsVoiceId"], "com.apple.voice.compact.zh-CN.Tingting");
+        assert_eq!(blob["volcTtsSpeaker"], "zh_male_liufei_uranus_bigtts");
 
         let restored: AppSettings = serde_json::from_str(&json).unwrap();
         assert!(!restored.tts_enabled);
-        assert_eq!(restored.tts_rate, 0.75);
-        assert_eq!(restored.tts_pitch, 1.4);
+        assert_eq!(restored.system_tts_rate, 0.75);
+        assert_eq!(restored.system_tts_pitch, 1.4);
+        assert_eq!(restored.volc_tts_rate, 0.3, "each provider keeps its own rate");
         assert_eq!(restored.tts_hotkey_config.as_deref(), Some("83|2304|0"));
     }
 
@@ -1057,8 +1076,9 @@ mod tests {
 
         assert_eq!(settings.hold_threshold_ms, 900, "existing values survive");
         assert!(settings.tts_enabled);
-        assert_eq!(settings.tts_rate, 0.5, "0.5 is the engine's 1x mark");
-        assert_eq!(settings.tts_pitch, 1.0);
+        assert_eq!(settings.system_tts_rate, 0.5, "0.5 is the engine's 1x mark");
+        assert_eq!(settings.system_tts_pitch, 1.0);
+        assert_eq!(settings.volc_tts_rate, 0.5);
         assert!(settings.tts_clipboard_fallback);
         assert!(
             settings.tts_hotkey_config.is_none(),

@@ -81,11 +81,11 @@ const ttsVoiceId = computed({
   get: () =>
     isVolcengine.value
       ? settingsStore.settings.volcTtsSpeaker
-      : settingsStore.settings.ttsVoiceId,
+      : settingsStore.settings.systemTtsVoiceId,
   set: (value: string) =>
     isVolcengine.value
       ? settingsStore.updateSetting('volcTtsSpeaker', value)
-      : settingsStore.updateSetting('ttsVoiceId', value)
+      : settingsStore.updateSetting('systemTtsVoiceId', value)
 })
 
 const volcTtsApiKey = computed({
@@ -98,21 +98,42 @@ const volcTtsResourceId = computed({
   set: (value: string) => settingsStore.updateSetting('volcTtsResourceId', value)
 })
 
-// The stored rate is normalized 0..1 around the engine default; the slider
-// speaks the user's language instead, which is "how many times normal speed".
+// Rate and volume belong to the provider, not to the feature: engines differ
+// in baseline speed and loudness, so tuning one must not move the other.
 const rateMultiplier = computed({
-  get: () => round2(settingsStore.settings.ttsRate / DEFAULT_RATE),
-  set: (value: number) => settingsStore.updateSetting('ttsRate', clamp(value * DEFAULT_RATE, 0, 1))
+  get: () =>
+    round2(
+      (isVolcengine.value
+        ? settingsStore.settings.volcTtsRate
+        : settingsStore.settings.systemTtsRate) / DEFAULT_RATE
+    ),
+  set: (value: number) => {
+    const stored = clamp(value * DEFAULT_RATE, 0, 1)
+    isVolcengine.value
+      ? settingsStore.updateSetting('volcTtsRate', stored)
+      : settingsStore.updateSetting('systemTtsRate', stored)
+  }
 })
 
 const volumePercent = computed({
-  get: () => Math.round(settingsStore.settings.ttsVolume * 100),
-  set: (value: number) => settingsStore.updateSetting('ttsVolume', clamp(value / 100, 0, 1))
+  get: () =>
+    Math.round(
+      (isVolcengine.value
+        ? settingsStore.settings.volcTtsVolume
+        : settingsStore.settings.systemTtsVolume) * 100
+    ),
+  set: (value: number) => {
+    const stored = clamp(value / 100, 0, 1)
+    isVolcengine.value
+      ? settingsStore.updateSetting('volcTtsVolume', stored)
+      : settingsStore.updateSetting('systemTtsVolume', stored)
+  }
 })
 
+// System voice only — no cloud provider exposes pitch.
 const pitchMultiplier = computed({
-  get: () => round2(settingsStore.settings.ttsPitch),
-  set: (value: number) => settingsStore.updateSetting('ttsPitch', clamp(value, 0.5, 2))
+  get: () => round2(settingsStore.settings.systemTtsPitch),
+  set: (value: number) => settingsStore.updateSetting('systemTtsPitch', clamp(value, 0.5, 2))
 })
 
 const clipboardFallback = computed({

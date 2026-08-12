@@ -171,7 +171,7 @@ const zhCN = {
     pressHotkey: '按下热键...',
     hotkeyConflict: '这个热键与录音热键相同，朗读已停用。请改其中一个。',
     voice: '音色',
-    voiceSub: '语速、音调与音量对所有朗读生效',
+    voiceSub: '这些参数只属于当前引擎——换一个引擎需要各自调整',
     voiceLabel: '音色',
     voiceDefault: '系统默认',
     voiceNote: '中文内容建议选中文音色；系统语言为英文时默认音色读中文会很别扭。',

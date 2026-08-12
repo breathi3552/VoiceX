@@ -151,23 +151,29 @@ export interface AppSettings {
     holdThresholdMs: number
     maxRecordingMinutes: number
 
-    // Selected-text reading (TTS)
+    // Selected-text reading (TTS) — feature-level settings only. Every
+    // synthesis parameter belongs to a provider block below, rate and volume
+    // included: engines differ in baseline speed and loudness.
     ttsEnabled: boolean
     ttsProviderType: 'system' | 'volcengine'
-    ttsVoiceId: string
-    /** Normalized 0..1. The UI shows it as a 0.5x–2x multiplier of 0.5. */
-    ttsRate: number
-    ttsVolume: number
-    /** Engine scale 0.5..2.0, where 1.0 is neutral. */
-    ttsPitch: number
     ttsHotkeyConfig: string | null
     ttsClipboardFallback: boolean
+
+    // TTS Provider: macOS system voice
+    systemTtsVoiceId: string
+    /** Normalized 0..1. The UI shows it as a 0.5x–2x multiplier of 0.5. */
+    systemTtsRate: number
+    systemTtsVolume: number
+    /** Engine scale 0.5..2.0, where 1.0 is neutral. No cloud engine has one. */
+    systemTtsPitch: number
 
     // TTS Provider: Volcengine (Doubao Seed-TTS 2.0)
     volcTtsApiKey: string
     /** The model string, not the console's instance id. */
     volcTtsResourceId: string
     volcTtsSpeaker: string
+    volcTtsRate: number
+    volcTtsVolume: number
 
     // Input
     inputDeviceUid: string | null
@@ -358,16 +364,19 @@ const defaultSettings: AppSettings = {
 
     ttsEnabled: true,
     ttsProviderType: 'system',
-    ttsVoiceId: '',
-    ttsRate: 0.5,
-    ttsVolume: 1,
-    ttsPitch: 1,
     ttsHotkeyConfig: null,
     ttsClipboardFallback: true,
+
+    systemTtsVoiceId: '',
+    systemTtsRate: 0.5,
+    systemTtsVolume: 1,
+    systemTtsPitch: 1,
 
     volcTtsApiKey: '',
     volcTtsResourceId: 'seed-tts-2.0',
     volcTtsSpeaker: 'zh_female_vv_uranus_bigtts',
+    volcTtsRate: 0.5,
+    volcTtsVolume: 1,
 
     inputDeviceUid: null,
     textInjectionMode: 'pasteboard',
