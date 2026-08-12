@@ -8,6 +8,7 @@
 
 use core_foundation::array::{CFArray, CFArrayRef};
 use core_foundation::base::{CFGetTypeID, CFRelease, CFTypeID, CFTypeRef, TCFType};
+use core_foundation::boolean::CFBoolean;
 use core_foundation::string::{CFString, CFStringRef};
 
 #[allow(non_camel_case_types)]
@@ -32,6 +33,12 @@ type AXUIElementRef = *const __AXUIElement;
 #[link(name = "ApplicationServices", kind = "framework")]
 extern "C" {
     fn AXUIElementCreateSystemWide() -> AXUIElementRef;
+    fn AXUIElementCreateApplication(pid: i32) -> AXUIElementRef;
+    fn AXUIElementSetAttributeValue(
+        element: AXUIElementRef,
+        attribute: CFStringRef,
+        value: CFTypeRef,
+    ) -> AXError;
     fn AXUIElementCopyAttributeValue(
         element: AXUIElementRef,
         attribute: CFStringRef,
@@ -60,6 +67,53 @@ extern "C" {
 /// the Accessibility path is unaffected and still reads normally.
 pub fn secure_event_input_enabled() -> bool {
     unsafe { IsSecureEventInputEnabled() }
+}
+
+/// Applications known to need [`enable_manual_accessibility`], by bundle id.
+///
+/// An allow-list, not a rule for Electron as a class: Chrome serves
+/// `AXSelectedText` with no intervention at all, and so does at least one other
+/// Electron app measured in plan §5.4. Writing the attribute changes the target
+/// application's state, so it is done only where it has been shown to be both
+/// necessary and sufficient.
+const MANUAL_ACCESSIBILITY_APPS: [&str; 2] = ["com.microsoft.VSCode", "com.vscodium.codium"];
+
+pub fn needs_manual_accessibility(bundle_id: Option<&str>) -> bool {
+    bundle_id.is_some_and(|id| MANUAL_ACCESSIBILITY_APPS.contains(&id))
+}
+
+/// Ask an Electron application to build its accessibility tree.
+///
+/// Electron exposes nothing to the Accessibility API until `AXManualAccessibility`
+/// is set, which is why a cold VS Code answers `AXFocusedUIElement` with nothing
+/// and the read falls through to the clipboard. Avoiding that fallback is worth
+/// something on its own: it is the only path that touches what the user copied.
+///
+/// Returns whether the attribute was accepted. Deliberately noisy in the log —
+/// this modifies another application's state, and a change we made should never
+/// have to be inferred later.
+pub fn enable_manual_accessibility(pid: i32) -> bool {
+    let app = unsafe { AXUIElementCreateApplication(pid) };
+    if app.is_null() {
+        return false;
+    }
+    let app = AxElement(app);
+
+    let attribute = CFString::new("AXManualAccessibility");
+    let value = CFBoolean::true_value();
+    let status = unsafe {
+        AXUIElementSetAttributeValue(app.0, attribute.as_concrete_TypeRef(), value.as_CFTypeRef())
+    };
+
+    if status == K_AX_ERROR_SUCCESS {
+        log::info!("Enabled AXManualAccessibility on pid {pid}");
+        true
+    } else {
+        // Not an error worth failing the read over: the clipboard fallback
+        // still works, which is exactly where we were headed anyway.
+        log::debug!("AXManualAccessibility refused by pid {pid}: status {status}");
+        false
+    }
 }
 
 /// Owned `AXUIElementRef`. Releases on drop.
@@ -233,6 +287,23 @@ mod tests {
 
     fn names(list: &[&str]) -> Vec<String> {
         list.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn manual_accessibility_is_an_allow_list_not_a_rule_for_electron() {
+        // Writing this attribute changes the target application's state, so it
+        // is limited to applications shown to need it. Chrome and at least one
+        // other Electron app serve AXSelectedText untouched (plan §5.1, §5.4),
+        // and poking those would be a side effect that buys nothing.
+        assert!(needs_manual_accessibility(Some("com.microsoft.VSCode")));
+        assert!(!needs_manual_accessibility(Some("com.google.Chrome")));
+        assert!(!needs_manual_accessibility(Some(
+            "com.anthropic.claudefordesktop"
+        )));
+        assert!(
+            !needs_manual_accessibility(None),
+            "unknown app: leave alone"
+        );
     }
 
     #[test]

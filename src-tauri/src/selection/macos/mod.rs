@@ -3,6 +3,8 @@
 mod ax;
 mod clipboard;
 
+use std::collections::HashSet;
+use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
 
 use crate::foreground_app;
@@ -45,10 +47,31 @@ pub fn read_selection(request: &SelectionRequest) -> Result<SelectionOutcome, Se
         return Err(SelectionError::PermissionDenied);
     }
 
-    let focused = match FocusedElement::read() {
+    let mut focused = match FocusedElement::read() {
         Ok(focused) => focused,
         Err(_api_disabled) => return Err(SelectionError::PermissionDenied),
     };
+
+    // An Electron application that has not been asked to build its
+    // accessibility tree answers with nothing at all. Asking costs one call and
+    // saves the clipboard fallback, which is the only path that touches what
+    // the user copied. Gated on the read having actually come up empty, so a
+    // healthy application is never poked.
+    if focused.is_none() && ax::needs_manual_accessibility(app_bundle_id.as_deref()) {
+        if enable_manual_accessibility_once(app_pid) {
+            focused = FocusedElement::read().unwrap_or(None);
+            log_event(
+                "selection_ax_enabled",
+                &[
+                    ("app", app_bundle_id.clone().unwrap_or_default()),
+                    (
+                        "focused",
+                        if focused.is_some() { "yes" } else { "no" }.to_string(),
+                    ),
+                ],
+            );
+        }
+    }
 
     // Distinguishes "the control says nothing is selected" from "the control
     // does not answer", which decides how a silent copy is reported.
@@ -122,6 +145,27 @@ pub fn read_selection(request: &SelectionRequest) -> Result<SelectionOutcome, Se
     }
 
     finish(text, SelectionSource::ClipboardCopy, Some(copied.restored))
+}
+
+/// Set `AXManualAccessibility` at most once per process.
+///
+/// Repeating it every read would be wasted calls, and more importantly it would
+/// keep re-announcing a change to another application's state that we already
+/// made. Keyed on pid, so a relaunched application is asked again — the new
+/// process has its own tree.
+fn enable_manual_accessibility_once(pid: u32) -> bool {
+    static ASKED: OnceLock<Mutex<HashSet<u32>>> = OnceLock::new();
+    let asked = ASKED.get_or_init(|| Mutex::new(HashSet::new()));
+
+    let Ok(mut asked) = asked.lock() else {
+        return false;
+    };
+    if !asked.insert(pid) {
+        // Already asked and it did not help; falling through to Copy is the
+        // answer, not asking again.
+        return false;
+    }
+    ax::enable_manual_accessibility(pid as i32)
 }
 
 /// Record what the Accessibility layer said about the focused control.
