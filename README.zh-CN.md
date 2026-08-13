@@ -16,6 +16,7 @@ VoiceX 是一个跨平台桌面语音输入工具。整体处理链路为：录�
 
 - **跨平台** — 同时支持 macOS 和 Windows，使用平台原生热键捕获、托盘图标和文本注入。
 - **多 ASR 后端** — 在十四种云端和本地语音识别引擎间自由切换，兼顾准确率、延迟、语种覆盖和隐私。
+- **选中朗读** — 在任意应用里选中文字，一个热键就读出来，可选系统语音或两家云端 TTS（目前仅 macOS）。详见 [README.md](./README.md#选中朗读)。
 - **一键多用** — 单个全局热键驱动三种交互模式：轻点启动免提听写、长按进入按住说话、双击触发翻译。
 - **实时 HUD 浮层** — 轻量置顶窗口，实时显示转写文本、录音模式、倒计时和处理状态；在 macOS 多桌面场景下也会跟随当前活跃 Space 显示，不打断当前工作流。
 - **LLM 后处理** — 可选将 ASR 输出交给大模型做纠错、翻译或润色，支持自定义 prompt 模板和词典上下文注入。
@@ -42,7 +43,7 @@ VoiceX 通过一个可配置的全局热键映射三种不同意图：
 | 火山引擎（豆包语音） | 云端流式 (WebSocket) | 中文优化；支持热词增强、ITN、标点、DDC |
 | Google Cloud Speech-to-Text V2 | 云端流式 (gRPC) | 多语种，Phrase Boost，可配置端点检测 |
 | Fun-ASR Realtime | 云端流式 (WebSocket) | DashScope；`fun-asr-realtime` / `fun-asr-flash-8k-realtime`；适合低延迟实时出字；部分模型支持以词典作为上下文增强 |
-| 通义千问（DashScope ASR） | 云端流式 / 批量文件识别 | 阿里云；支持 `Realtime`、`Batch` 和 `Realtime + 录后 Batch 精修`；batch 路径当前受 5 分钟短音频接口限制 |
+| 通义千问（DashScope ASR） | 云端流式 / 批量文件识别 | 阿里云；新一代 `qwen-audio-3.0-asr-flash(-streaming)` 与既有 Qwen3-ASR 两代模型；支持 `Realtime`、`Batch` 和 `Realtime + 录后 Batch 精修`；新一代模型支持实时热词与权重、预编译热词表、上下文、语义断句；batch 路径当前受 5 分钟短音频接口限制 |
 | Gemini Audio Transcription | 云端批量文件识别 | `gemini-3.1-flash-lite-preview`；录音结束后上传整段音频；支持自动 / 中文 / English / 中英混合提示 |
 | Gemini Live Realtime | 云端流式 (WebSocket) | `gemini-3.1-flash-live-preview`；基于输入音频转写的实时识别，可附带语言提示 |
 | Cohere Audio Transcription | 云端批量文件识别 | `cohere-transcribe-03-2026`；整段音频上传识别，需显式指定 ISO-639-1 语言码 |

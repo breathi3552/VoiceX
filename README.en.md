@@ -16,6 +16,7 @@ VoiceX is a cross-platform desktop voice input tool. Its overall pipeline is: re
 
 - **Cross-platform** — runs on macOS and Windows with platform-native hotkey capture, tray icon, and text injection.
 - **Multiple ASR backends** — switch between fourteen cloud and local speech recognition providers to balance accuracy, latency, language coverage, and privacy.
+- **Read selection** — select text in any application and one hotkey reads it aloud, through the system voice or either of two cloud TTS providers (macOS only for now).
 - **One hotkey, multiple gestures** — a single global hotkey drives three interaction modes: tap for hands-free dictation, hold for push-to-talk, double-tap to translate.
 - **Real-time HUD overlay** — a lightweight always-on-top display shows live transcription, recording mode, countdown timer, and processing status, and on macOS it follows the active Space when triggered from another desktop.
 - **LLM-powered post-processing** — optionally send ASR output through an LLM for correction, translation, or refinement, with customizable prompt templates and dictionary-aware context.
@@ -41,10 +42,14 @@ VoiceX also works in the other direction: select text in **any application**,
 press **⌥⌘R** (configurable), and it reads the selection aloud. Press again, or
 press **Escape**, to stop immediately.
 
+> **macOS only for now.** Reading the selection out of another application goes
+> through the macOS Accessibility API; there is no Windows implementation yet, so
+> the hotkey is not registered there and still reaches the foreground application.
+
 | | Detail |
 |---|---|
 | **How text is read** | Straight from the Accessibility API where possible (8–15 ms); otherwise it falls back to a synthetic Command + C and restores your clipboard afterwards. The fallback can be switched off, at the cost of Safari and VS Code support |
-| **Speech engines** | The system voice (offline, no setup) or Volcengine Doubao Seed-TTS 2.0 (cloud, noticeably better). Voice, rate and volume are stored per engine |
+| **Speech engines** | The system voice (offline, no setup), Volcengine Doubao Seed-TTS 2.0, or Alibaba Cloud Model Studio (`qwen3-tts-flash`, 48 voices including Beijing, Shanghai, Sichuan and Cantonese; `qwen-audio-3.0-tts-flash` for longer text per read). Both cloud engines stream, so speech starts roughly 0.4–0.6 s after the hotkey. Voice, rate and volume are stored per engine |
 | **Yields to dictation** | Starting dictation stops reading — otherwise the microphone would record the speech and transcribe it back |
 
 ### How this differs from the built-in "Speak selection"
@@ -82,7 +87,7 @@ working in places we cannot reach such as the login window.
 | Volcengine (Doubao Speech) | Cloud streaming (WebSocket) | Optimized for Chinese; hot-word boosting, ITN, punctuation, DDC |
 | Google Cloud Speech-to-Text V2 | Cloud streaming (gRPC) | Multi-language, phrase boost, configurable endpointing |
 | Fun-ASR Realtime | Cloud streaming (WebSocket) | DashScope; `fun-asr-realtime` / `fun-asr-flash-8k-realtime`; tuned for low-latency live dictation; selected models accept the dictionary as recognition context |
-| Qwen (DashScope ASR) | Cloud streaming / batch file upload | Alibaba Cloud; supports `Realtime`, `Batch`, and `Realtime + Batch Refine`; batch paths currently inherit a 5-minute short-audio API cap |
+| Qwen (DashScope ASR) | Cloud streaming / batch file upload | Alibaba Cloud; both model generations — the new `qwen-audio-3.0-asr-flash(-streaming)` and the existing Qwen3-ASR; supports `Realtime`, `Batch`, and `Realtime + Batch Refine`; the new generation adds inline hotwords with a weight, precompiled vocabularies, context, and semantic endpointing; batch paths currently inherit a 5-minute short-audio API cap |
 | Gemini Audio Transcription | Cloud batch file upload | `gemini-3.1-flash-lite-preview`; starts after recording stops; supports auto / zh / en / zh+en hints |
 | Gemini Live Realtime | Cloud streaming (WebSocket) | `gemini-3.1-flash-live-preview`; realtime input-audio transcription with language hints |
 | Cohere Audio Transcription | Cloud batch file upload | `cohere-transcribe-03-2026`; whole-file transcription with explicit ISO-639-1 language hint |
