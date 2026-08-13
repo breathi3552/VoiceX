@@ -58,11 +58,13 @@ const ttsEnabled = computed({
   }
 })
 
-type ProviderValue = 'system' | 'volcengine'
+type ProviderValue = 'system' | 'volcengine' | 'aliyun'
+type AliyunModel = 'qwen3-tts-flash' | 'qwen-audio-3.0-tts-flash'
 
 const providerOptions = computed(() => [
   { label: t('reading.providerSystem'), value: 'system' },
-  { label: t('reading.providerVolcengine'), value: 'volcengine' }
+  { label: t('reading.providerVolcengine'), value: 'volcengine' },
+  { label: t('reading.providerAliyun'), value: 'aliyun' }
 ])
 
 const ttsProviderType = computed({
@@ -75,29 +77,57 @@ const ttsProviderType = computed({
 })
 
 const isVolcengine = computed(() => settingsStore.settings.ttsProviderType === 'volcengine')
+const isAliyun = computed(() => settingsStore.settings.ttsProviderType === 'aliyun')
+// Everything that distinguishes "speaks over the network" from "speaks through
+// macOS" — voice list availability, the missing pitch control, whether the
+// controls work off macOS at all.
+const isCloud = computed(() => isVolcengine.value || isAliyun.value)
+
+const aliyunModelOptions = computed(() => [
+  { label: t('reading.aliyunModelQwen3'), value: 'qwen3-tts-flash' },
+  { label: t('reading.aliyunModelQwenAudio'), value: 'qwen-audio-3.0-tts-flash' }
+])
+
+const aliyunTtsModel = computed({
+  get: () => settingsStore.settings.aliyunTtsModel,
+  set: (value: AliyunModel) => {
+    settingsStore.updateSetting('aliyunTtsModel', value)
+    // The two models have entirely separate voice tables.
+    void loadVoices('aliyun', value)
+  }
+})
+
+// Which voice setting the picker is editing. The two Alibaba Cloud models
+// reject each other's ids, so they cannot share one key: switching model would
+// otherwise leave a voice that fails on the next read.
+const aliyunVoiceKey = computed(() =>
+  settingsStore.settings.aliyunTtsModel === 'qwen-audio-3.0-tts-flash'
+    ? ('aliyunTtsVoiceQwenAudio' as const)
+    : ('aliyunTtsVoiceQwen3' as const)
+)
 
 const voiceOptions = computed(() => {
   const listed = voices.value.map((voice) => ({
     label: `${voice.name} · ${voice.language}`,
     value: voice.id
   }))
-  // The cloud provider has no default-voice concept, and an empty speaker is
+  // The cloud providers have no default-voice concept, and an empty speaker is
   // not a valid request — so only the local engine gets that entry.
-  return isVolcengine.value
-    ? listed
-    : [{ label: t('reading.voiceDefault'), value: '' }, ...listed]
+  return isCloud.value ? listed : [{ label: t('reading.voiceDefault'), value: '' }, ...listed]
 })
 
 // Voice identifiers do not carry across providers, so each keeps its own.
 const ttsVoiceId = computed({
-  get: () =>
-    isVolcengine.value
-      ? settingsStore.settings.volcTtsSpeaker
-      : settingsStore.settings.systemTtsVoiceId,
-  set: (value: string) =>
-    isVolcengine.value
-      ? settingsStore.updateSetting('volcTtsSpeaker', value)
-      : settingsStore.updateSetting('systemTtsVoiceId', value)
+  get: () => {
+    if (isVolcengine.value) return settingsStore.settings.volcTtsSpeaker
+    if (isAliyun.value) return settingsStore.settings[aliyunVoiceKey.value]
+    return settingsStore.settings.systemTtsVoiceId
+  },
+  set: (value: string) => {
+    if (isVolcengine.value) settingsStore.updateSetting('volcTtsSpeaker', value)
+    else if (isAliyun.value) settingsStore.updateSetting(aliyunVoiceKey.value, value)
+    else settingsStore.updateSetting('systemTtsVoiceId', value)
+  }
 })
 
 const volcTtsApiKey = computed({
@@ -110,35 +140,44 @@ const volcTtsResourceId = computed({
   set: (value: string) => settingsStore.updateSetting('volcTtsResourceId', value)
 })
 
+const aliyunTtsApiKey = computed({
+  get: () => settingsStore.settings.aliyunTtsApiKey,
+  set: (value: string) => settingsStore.updateSetting('aliyunTtsApiKey', value)
+})
+
 // Rate and volume belong to the provider, not to the feature: engines differ
 // in baseline speed and loudness, so tuning one must not move the other.
 const rateMultiplier = computed({
-  get: () =>
-    round2(
-      (isVolcengine.value
-        ? settingsStore.settings.volcTtsRate
-        : settingsStore.settings.systemTtsRate) / DEFAULT_RATE
-    ),
+  get: () => {
+    const stored = isVolcengine.value
+      ? settingsStore.settings.volcTtsRate
+      : isAliyun.value
+        ? settingsStore.settings.aliyunTtsRate
+        : settingsStore.settings.systemTtsRate
+    return round2(stored / DEFAULT_RATE)
+  },
   set: (value: number) => {
     const stored = clamp(value * DEFAULT_RATE, 0, 1)
-    isVolcengine.value
-      ? settingsStore.updateSetting('volcTtsRate', stored)
-      : settingsStore.updateSetting('systemTtsRate', stored)
+    if (isVolcengine.value) settingsStore.updateSetting('volcTtsRate', stored)
+    else if (isAliyun.value) settingsStore.updateSetting('aliyunTtsRate', stored)
+    else settingsStore.updateSetting('systemTtsRate', stored)
   }
 })
 
 const volumePercent = computed({
-  get: () =>
-    Math.round(
-      (isVolcengine.value
-        ? settingsStore.settings.volcTtsVolume
-        : settingsStore.settings.systemTtsVolume) * 100
-    ),
+  get: () => {
+    const stored = isVolcengine.value
+      ? settingsStore.settings.volcTtsVolume
+      : isAliyun.value
+        ? settingsStore.settings.aliyunTtsVolume
+        : settingsStore.settings.systemTtsVolume
+    return Math.round(stored * 100)
+  },
   set: (value: number) => {
     const stored = clamp(value / 100, 0, 1)
-    isVolcengine.value
-      ? settingsStore.updateSetting('volcTtsVolume', stored)
-      : settingsStore.updateSetting('systemTtsVolume', stored)
+    if (isVolcengine.value) settingsStore.updateSetting('volcTtsVolume', stored)
+    else if (isAliyun.value) settingsStore.updateSetting('aliyunTtsVolume', stored)
+    else settingsStore.updateSetting('systemTtsVolume', stored)
   }
 })
 
@@ -199,10 +238,13 @@ async function resetHotkey() {
   await applyHotkey()
 }
 
-async function loadVoices(provider: ProviderValue = settingsStore.settings.ttsProviderType) {
-  // The cloud provider is network-only, so its voice list works everywhere;
+async function loadVoices(
+  provider: ProviderValue = settingsStore.settings.ttsProviderType,
+  model: AliyunModel = settingsStore.settings.aliyunTtsModel
+) {
+  // The cloud providers are network-only, so their voice lists work everywhere;
   // only the system voice needs macOS.
-  if (!isMacOS && provider !== 'volcengine') {
+  if (!isMacOS && provider === 'system') {
     voices.value = []
     return
   }
@@ -210,9 +252,9 @@ async function loadVoices(provider: ProviderValue = settingsStore.settings.ttsPr
   // screen, which is how system voices used to show up under the cloud engine.
   voices.value = []
   try {
-    // Passed explicitly — the store's save is debounced, so the backend would
-    // still read the previous provider from the database.
-    voices.value = await invoke<TtsVoiceOption[]>('list_tts_voices', { provider })
+    // Both passed explicitly — the store's save is debounced, so the backend
+    // would still read the previous provider and model from the database.
+    voices.value = await invoke<TtsVoiceOption[]>('list_tts_voices', { provider, model })
     voicesError.value = ''
   } catch (error) {
     voices.value = []
@@ -325,58 +367,10 @@ onBeforeUnmount(() => {
       <div class="warning-box">{{ t('reading.unsupportedPlatform') }}</div>
     </div>
 
-    <div class="surface-card asr-card">
-      <div class="card-header">
-        <div class="card-title">{{ t('reading.provider') }}</div>
-        <div class="card-sub">{{ t('reading.providerSub') }}</div>
-      </div>
-      <div class="field-list">
-        <div class="field-row">
-          <div class="field-text">
-            <div class="field-label">{{ t('reading.ttsProvider') }}</div>
-          </div>
-          <NSelect
-            v-model:value="ttsProviderType"
-            :options="providerOptions"
-            size="small"
-            class="field-control"
-          />
-        </div>
-
-        <template v-if="isVolcengine">
-          <!-- Plan §3.4: told once, when the engine is chosen, rather than
-               asked on every read. -->
-          <div class="notice-box">{{ t('reading.cloudPrivacy') }}</div>
-          <div class="field-row">
-            <div class="field-text">
-              <div class="field-label">{{ t('reading.volcApiKey') }}</div>
-              <div class="field-note">{{ t('reading.volcApiKeyNote') }}</div>
-            </div>
-            <NInput
-              v-model:value="volcTtsApiKey"
-              type="password"
-              show-password-on="click"
-              size="small"
-              class="field-control"
-              :placeholder="t('reading.volcApiKeyPlaceholder')"
-            />
-          </div>
-          <div class="field-row">
-            <div class="field-text">
-              <div class="field-label">{{ t('reading.volcResourceId') }}</div>
-              <div class="field-note">{{ t('reading.volcResourceIdNote') }}</div>
-            </div>
-            <NInput
-              v-model:value="volcTtsResourceId"
-              size="small"
-              class="field-control"
-              placeholder="seed-tts-2.0"
-            />
-          </div>
-        </template>
-      </div>
-    </div>
-
+    <!-- The feature itself comes first — whether it is on, and which key. Both
+         are independent of the engine, so leaving them between the engine and
+         the engine's own parameters split one subject across two cards with an
+         unrelated one wedged in the middle. -->
     <div class="surface-card asr-card">
       <div class="card-header">
         <div class="card-title">{{ t('reading.general') }}</div>
@@ -431,6 +425,88 @@ onBeforeUnmount(() => {
 
     <div class="surface-card asr-card">
       <div class="card-header">
+        <div class="card-title">{{ t('reading.provider') }}</div>
+        <div class="card-sub">{{ t('reading.providerSub') }}</div>
+      </div>
+      <div class="field-list">
+        <div class="field-row">
+          <div class="field-text">
+            <div class="field-label">{{ t('reading.ttsProvider') }}</div>
+          </div>
+          <NSelect
+            v-model:value="ttsProviderType"
+            :options="providerOptions"
+            size="small"
+            class="field-control"
+          />
+        </div>
+
+        <!-- Plan §3.4: told once, when the engine is chosen, rather than
+             asked on every read. -->
+        <div v-if="isCloud" class="notice-box">{{ t('reading.cloudPrivacy') }}</div>
+
+        <template v-if="isVolcengine">
+          <div class="field-row">
+            <div class="field-text">
+              <div class="field-label">{{ t('reading.volcApiKey') }}</div>
+              <div class="field-note">{{ t('reading.volcApiKeyNote') }}</div>
+            </div>
+            <NInput
+              v-model:value="volcTtsApiKey"
+              type="password"
+              show-password-on="click"
+              size="small"
+              class="field-control"
+              :placeholder="t('reading.volcApiKeyPlaceholder')"
+            />
+          </div>
+          <div class="field-row">
+            <div class="field-text">
+              <div class="field-label">{{ t('reading.volcResourceId') }}</div>
+              <div class="field-note">{{ t('reading.volcResourceIdNote') }}</div>
+            </div>
+            <NInput
+              v-model:value="volcTtsResourceId"
+              size="small"
+              class="field-control"
+              placeholder="seed-tts-2.0"
+            />
+          </div>
+        </template>
+
+        <template v-if="isAliyun">
+          <div class="field-row">
+            <div class="field-text">
+              <div class="field-label">{{ t('reading.aliyunApiKey') }}</div>
+              <div class="field-note">{{ t('reading.aliyunApiKeyNote') }}</div>
+            </div>
+            <NInput
+              v-model:value="aliyunTtsApiKey"
+              type="password"
+              show-password-on="click"
+              size="small"
+              class="field-control"
+              placeholder="sk-..."
+            />
+          </div>
+          <div class="field-row">
+            <div class="field-text">
+              <div class="field-label">{{ t('reading.aliyunModel') }}</div>
+              <div class="field-note">{{ t('reading.aliyunModelNote') }}</div>
+            </div>
+            <NSelect
+              v-model:value="aliyunTtsModel"
+              :options="aliyunModelOptions"
+              size="small"
+              class="field-control"
+            />
+          </div>
+        </template>
+      </div>
+    </div>
+
+    <div class="surface-card asr-card">
+      <div class="card-header">
         <div class="card-title">{{ t('reading.voice') }}</div>
         <div class="card-sub">{{ t('reading.voiceSub') }}</div>
       </div>
@@ -439,14 +515,14 @@ onBeforeUnmount(() => {
           <div class="field-text">
             <div class="field-label">{{ t('reading.voiceLabel') }}</div>
             <div class="field-note">
-              {{ isVolcengine ? t('reading.volcSpeakerNote') : t('reading.voiceNote') }}
+              {{ isCloud ? t('reading.cloudSpeakerNote') : t('reading.voiceNote') }}
             </div>
           </div>
           <NSelect
             v-model:value="ttsVoiceId"
             :options="voiceOptions"
-            :disabled="!isMacOS && !isVolcengine"
-            :tag="isVolcengine"
+            :disabled="!isMacOS && !isCloud"
+            :tag="isCloud"
             filterable
             size="small"
             class="field-control"
@@ -467,16 +543,18 @@ onBeforeUnmount(() => {
               :min="0.5"
               :max="2"
               :step="0.05"
-              :disabled="!isMacOS"
+              :disabled="!isMacOS && !isCloud"
               class="slider"
             />
             <span class="slider-value">{{ rateMultiplier.toFixed(2) }}x</span>
           </div>
         </div>
 
-        <!-- Volcengine's audio_params carry no pitch, so the row would be a
-             control that quietly does nothing. -->
-        <div v-if="!isVolcengine" class="field-row">
+        <!-- No cloud engine here exposes a usable pitch: Volcengine's
+             audio_params carry none, and Alibaba Cloud's pitch_rate stretched a
+             sample to 4.2x when halved, so what it changes is not pitch alone.
+             Either way the row would be a control that lies. -->
+        <div v-if="!isCloud" class="field-row">
           <div class="field-text">
             <div class="field-label">{{ t('reading.pitch') }}</div>
           </div>
@@ -503,7 +581,7 @@ onBeforeUnmount(() => {
               :min="0"
               :max="100"
               :step="5"
-              :disabled="!isMacOS"
+              :disabled="!isMacOS && !isCloud"
               class="slider"
             />
             <span class="slider-value">{{ volumePercent }}%</span>
@@ -518,7 +596,7 @@ onBeforeUnmount(() => {
           <div class="field-control end">
             <NButton
               :loading="previewLoading"
-              :disabled="!isMacOS && !isVolcengine"
+              :disabled="!isMacOS && !isCloud"
               :type="previewSpeaking ? 'default' : 'primary'"
               secondary
               size="small"

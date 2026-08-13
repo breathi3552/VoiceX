@@ -5,6 +5,7 @@
 //! audio bytes); a cloud backend composes synthesis and playback behind the
 //! same trait.
 
+pub mod aliyun;
 pub mod controller;
 pub mod decode;
 #[cfg(target_os = "macos")]

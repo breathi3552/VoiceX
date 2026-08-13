@@ -7,6 +7,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 ## [Unreleased]
 
 ### Added
+- **Alibaba Cloud Model Studio as a reading voice** — Settings → Reading can now speak selected text through 百炼, with a model picker for `qwen3-tts-flash` (48 voices including Beijing, Shanghai, Sichuan and Cantonese) and `qwen-audio-3.0-tts-flash` (longer text per read). Streams over HTTP with server-sent events, so speech starts ~430 ms after the hotkey rather than after the whole selection is synthesized. Works on Windows as well as macOS. The two models are separate services with separate voices, so each keeps its own voice setting and switching model switches the picker with it. See `docs/aliyun-tts-provider-research-2026-08-13.md` for the protocol survey and the probe script that produced it.
 - **Qwen3-ASR as a local offline provider** — Alibaba's open-weight model (Apache-2.0) can now be selected in Settings → ASR, driven through the external `qwen-asr` CLI. Audio never leaves the machine. Language forcing defaults to Chinese and the user dictionary is passed as a biasing prompt, since both measurably improve accuracy. Recognition is whole-utterance (text appears on hotkey release); the CLI emits no incremental output. macOS / Linux only. See the README for setup.
 - **Latency tier for OpenAI Realtime** — `gpt-live-transcribe` sessions expose OpenAI's `delay` setting (`minimal` … `xhigh`) to trade first-token latency against accuracy.
 

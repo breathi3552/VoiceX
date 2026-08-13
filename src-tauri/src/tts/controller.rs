@@ -13,6 +13,7 @@ use std::thread;
 
 use tauri::{AppHandle, Emitter};
 
+use super::aliyun::{self, AliyunBackend, AliyunConfig};
 use super::volcengine::{self, VolcengineBackend, VolcengineConfig};
 use super::{
     log_event, truncate_for_backend, SessionSlot, StopReason, TtsBackend, TtsError, TtsRequest,
@@ -41,17 +42,19 @@ const HUD_LINGER_MS: u64 = 400;
 /// failed read is visible at all.
 const HUD_ERROR_LINGER_MS: u64 = 2_600;
 
-/// Settings value selecting the cloud backend.
+/// Settings values selecting a cloud backend.
 const PROVIDER_VOLCENGINE: &str = "volcengine";
+const PROVIDER_ALIYUN: &str = "aliyun";
 
 #[derive(Default)]
 struct ControllerInner {
     app: Mutex<Option<AppHandle>>,
     /// The macOS system voice. Absent on other platforms.
     system: Mutex<Option<Arc<dyn TtsBackend>>>,
-    /// Kept as its concrete type so credentials can be re-applied without
-    /// rebuilding it — the settings page changes them while the app runs.
+    /// Kept as their concrete types so credentials can be re-applied without
+    /// rebuilding them — the settings page changes them while the app runs.
     volcengine: Mutex<Option<Arc<VolcengineBackend>>>,
+    aliyun: Mutex<Option<Arc<AliyunBackend>>>,
     /// Whichever backend owns the current session. `stop` has to reach that
     /// one, not whichever provider the settings happen to name right now.
     active: Mutex<Option<Arc<dyn TtsBackend>>>,
@@ -90,12 +93,18 @@ impl TtsController {
             }
         }
 
-        // Built unconditionally: it is network-only, so it works wherever the
-        // app runs, including where there is no system voice at all.
+        // Built unconditionally: they are network-only, so they work wherever
+        // the app runs, including where there is no system voice at all.
         if let Ok(mut slot) = self.inner.volcengine.lock() {
             *slot = Some(Arc::new(VolcengineBackend::new(VolcengineConfig {
                 api_key: String::new(),
                 resource_id: volcengine::DEFAULT_RESOURCE_ID.to_string(),
+            })));
+        }
+        if let Ok(mut slot) = self.inner.aliyun.lock() {
+            *slot = Some(Arc::new(AliyunBackend::new(AliyunConfig {
+                api_key: String::new(),
+                model: aliyun::default_model().to_string(),
             })));
         }
     }
@@ -214,21 +223,38 @@ impl TtsController {
         provider: &str,
         settings: Option<&AppSettings>,
     ) -> Option<Arc<dyn TtsBackend>> {
-        if provider == PROVIDER_VOLCENGINE {
-            let cloud = self
-                .inner
-                .volcengine
-                .lock()
-                .ok()
-                .and_then(|slot| slot.clone());
-            if let (Some(cloud), Some(settings)) = (cloud, settings) {
-                cloud.apply_config(VolcengineConfig {
-                    api_key: settings.volc_tts_api_key.clone(),
-                    resource_id: settings.volc_tts_resource_id.clone(),
-                });
-                return Some(cloud as Arc<dyn TtsBackend>);
+        match provider {
+            PROVIDER_VOLCENGINE => {
+                let cloud = self
+                    .inner
+                    .volcengine
+                    .lock()
+                    .ok()
+                    .and_then(|slot| slot.clone());
+                if let (Some(cloud), Some(settings)) = (cloud, settings) {
+                    cloud.apply_config(VolcengineConfig {
+                        api_key: settings.volc_tts_api_key.clone(),
+                        resource_id: settings.volc_tts_resource_id.clone(),
+                    });
+                    return Some(cloud as Arc<dyn TtsBackend>);
+                }
+                log_event("backend_fallback", &[("provider", provider.to_string())]);
             }
-            log_event("backend_fallback", &[("provider", provider.to_string())]);
+            PROVIDER_ALIYUN => {
+                let cloud = self.inner.aliyun.lock().ok().and_then(|slot| slot.clone());
+                if let (Some(cloud), Some(settings)) = (cloud, settings) {
+                    // The model has to be applied here and not only at speak
+                    // time: it decides which voice list the settings page shows
+                    // and which text limit the truncation uses.
+                    cloud.apply_config(AliyunConfig {
+                        api_key: settings.aliyun_tts_api_key.clone(),
+                        model: settings.aliyun_tts_model.clone(),
+                    });
+                    return Some(cloud as Arc<dyn TtsBackend>);
+                }
+                log_event("backend_fallback", &[("provider", provider.to_string())]);
+            }
+            _ => {}
         }
 
         self.inner.system.lock().ok().and_then(|slot| slot.clone())
@@ -260,9 +286,23 @@ impl TtsController {
 
     /// Voices offered by `provider`, or by the configured one when `None`.
     ///
+    /// `model` overrides the stored one for providers that have several, for the
+    /// same reason `provider` is passed in: the settings page asks about a
+    /// choice the debounced save has not written yet, so reading it back from
+    /// the store would list the previous model's voices.
+    ///
     /// Blocking, and hops to the main thread — never call from there.
-    pub fn list_voices(&self, provider: Option<&str>) -> Result<Vec<TtsVoice>, TtsError> {
-        let settings = load_settings();
+    pub fn list_voices(
+        &self,
+        provider: Option<&str>,
+        model: Option<&str>,
+    ) -> Result<Vec<TtsVoice>, TtsError> {
+        let mut settings = load_settings();
+        if let (Some(settings), Some(model)) = (settings.as_mut(), model) {
+            if !model.trim().is_empty() {
+                settings.aliyun_tts_model = model.to_string();
+            }
+        }
         let provider = provider
             .or_else(|| settings.as_ref().map(|s| s.tts_provider_type.as_str()))
             .unwrap_or_default();
@@ -559,20 +599,25 @@ fn load_settings() -> Option<AppSettings> {
 /// An empty voice id means "backend default", which is not the same as a voice
 /// literally named "".
 fn voice_request(settings: &AppSettings, text: String) -> TtsRequest {
-    let (voice, rate, volume, pitch) = if settings.tts_provider_type == PROVIDER_VOLCENGINE {
-        (
+    let (voice, rate, volume, pitch) = match settings.tts_provider_type.as_str() {
+        PROVIDER_VOLCENGINE => (
             settings.volc_tts_speaker.clone(),
             settings.volc_tts_rate,
             settings.volc_tts_volume,
             None,
-        )
-    } else {
-        (
+        ),
+        PROVIDER_ALIYUN => (
+            aliyun_voice(settings),
+            settings.aliyun_tts_rate,
+            settings.aliyun_tts_volume,
+            None,
+        ),
+        _ => (
             settings.system_tts_voice_id.clone(),
             settings.system_tts_rate,
             settings.system_tts_volume,
             Some(settings.system_tts_pitch),
-        )
+        ),
     };
 
     TtsRequest {
@@ -581,6 +626,19 @@ fn voice_request(settings: &AppSettings, text: String) -> TtsRequest {
         rate: Some(rate),
         volume: Some(volume),
         pitch,
+    }
+}
+
+/// The Aliyun voice for whichever model is selected.
+///
+/// The two model families reject each other's voice ids outright, so they get a
+/// setting each and switching model must not carry the old id over — one shared
+/// key would make every model switch produce a guaranteed 400.
+fn aliyun_voice(settings: &AppSettings) -> String {
+    if settings.aliyun_tts_model == aliyun::MODEL_QWEN_AUDIO {
+        settings.aliyun_tts_voice_qwen_audio.clone()
+    } else {
+        settings.aliyun_tts_voice_qwen3.clone()
     }
 }
 
@@ -672,11 +730,39 @@ mod tests {
     }
 
     #[test]
+    fn the_aliyun_voice_follows_the_selected_model() {
+        // The two families reject each other's voice ids, so switching model
+        // has to switch voice with it. Carrying one over is not a wrong-sounding
+        // voice, it is a guaranteed 400 on the next read.
+        use crate::tts::aliyun::{MODEL_QWEN3, MODEL_QWEN_AUDIO};
+
+        let mut settings = AppSettings::default();
+        settings.tts_provider_type = "aliyun".to_string();
+        settings.aliyun_tts_voice_qwen3 = "Dylan".to_string();
+        settings.aliyun_tts_voice_qwen_audio = "longanfengyue".to_string();
+
+        settings.aliyun_tts_model = MODEL_QWEN3.to_string();
+        assert_eq!(
+            voice_request(&settings, "hi".to_string()).voice.as_deref(),
+            Some("Dylan")
+        );
+
+        settings.aliyun_tts_model = MODEL_QWEN_AUDIO.to_string();
+        assert_eq!(
+            voice_request(&settings, "hi".to_string()).voice.as_deref(),
+            Some("longanfengyue")
+        );
+    }
+
+    #[test]
     fn a_cloud_request_carries_no_pitch_at_all() {
         // Sending a pitch no cloud provider implements would be a value the
         // backend silently drops; `None` says so in the type instead.
         let mut settings = AppSettings::default();
         settings.tts_provider_type = "volcengine".to_string();
+        assert_eq!(voice_request(&settings, "hi".to_string()).pitch, None);
+
+        settings.tts_provider_type = "aliyun".to_string();
         assert_eq!(voice_request(&settings, "hi".to_string()).pitch, None);
     }
 

@@ -155,7 +155,7 @@ export interface AppSettings {
     // synthesis parameter belongs to a provider block below, rate and volume
     // included: engines differ in baseline speed and loudness.
     ttsEnabled: boolean
-    ttsProviderType: 'system' | 'volcengine'
+    ttsProviderType: 'system' | 'volcengine' | 'aliyun'
     ttsHotkeyConfig: string | null
     ttsClipboardFallback: boolean
 
@@ -174,6 +174,16 @@ export interface AppSettings {
     volcTtsSpeaker: string
     volcTtsRate: number
     volcTtsVolume: number
+
+    // TTS Provider: Alibaba Cloud Model Studio (百炼)
+    aliyunTtsApiKey: string
+    /** The two models are separate services; the backend maps between them. */
+    aliyunTtsModel: 'qwen3-tts-flash' | 'qwen-audio-3.0-tts-flash'
+    /** One voice per model family — either rejects the other's ids outright. */
+    aliyunTtsVoiceQwen3: string
+    aliyunTtsVoiceQwenAudio: string
+    aliyunTtsRate: number
+    aliyunTtsVolume: number
 
     // Input
     inputDeviceUid: string | null
@@ -377,6 +387,13 @@ const defaultSettings: AppSettings = {
     volcTtsSpeaker: 'zh_female_vv_uranus_bigtts',
     volcTtsRate: 0.5,
     volcTtsVolume: 1,
+
+    aliyunTtsApiKey: '',
+    aliyunTtsModel: 'qwen3-tts-flash',
+    aliyunTtsVoiceQwen3: 'Cherry',
+    aliyunTtsVoiceQwenAudio: 'longanfengyue',
+    aliyunTtsRate: 0.5,
+    aliyunTtsVolume: 1,
 
     inputDeviceUid: null,
     textInjectionMode: 'pasteboard',

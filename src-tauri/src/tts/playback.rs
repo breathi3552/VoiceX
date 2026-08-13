@@ -27,6 +27,10 @@ use super::CancelToken;
 /// We ask the provider for a rate the output device already runs at, which
 /// keeps a resampler out of the playback path entirely — one less stage to get
 /// subtly wrong. Every provider in plan §5.4 offers all of these.
+///
+/// Not every provider added since does: `qwen3-tts-flash` renders only
+/// 8/16/24/48 kHz, so a backend whose model is fussier passes its own list to
+/// [`negotiate_sample_rate_among`] instead of using this one.
 const NEGOTIABLE_RATES: [u32; 5] = [48_000, 44_100, 24_000, 22_050, 16_000];
 
 /// How long the device may go without consuming anything while samples are
@@ -81,13 +85,25 @@ impl PlaybackError {
 /// mismatch would come out as chipmunk audio, which is far harder to diagnose
 /// than an error code.
 pub fn negotiate_sample_rate() -> Result<u32, PlaybackError> {
+    negotiate_sample_rate_among(&NEGOTIABLE_RATES)
+}
+
+/// Pick a sample rate from `candidates`, best first.
+///
+/// For backends whose provider renders a narrower set than [`NEGOTIABLE_RATES`].
+/// The device's own rate still wins when it is on the list; otherwise the first
+/// candidate the device can open is taken and the device is opened at that rate,
+/// which cpal handles. Asking for a rate the *provider* does not render is the
+/// case this exists to prevent: the audio would come back at some other rate and
+/// surface as a `sample_rate_mismatch` decode error rather than as speech.
+pub fn negotiate_sample_rate_among(candidates: &[u32]) -> Result<u32, PlaybackError> {
     let device = cpal::default_host()
         .default_output_device()
         .ok_or(PlaybackError::NoDevice)?;
 
     if let Ok(default) = device.default_output_config() {
         let rate = default.sample_rate().0;
-        if NEGOTIABLE_RATES.contains(&rate) {
+        if candidates.contains(&rate) {
             return Ok(rate);
         }
     }
@@ -97,7 +113,7 @@ pub fn negotiate_sample_rate() -> Result<u32, PlaybackError> {
         .map_err(|err| PlaybackError::Device(err.to_string()))?
         .collect();
 
-    NEGOTIABLE_RATES
+    candidates
         .iter()
         .copied()
         .find(|rate| {

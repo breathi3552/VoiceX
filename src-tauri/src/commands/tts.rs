@@ -23,26 +23,32 @@ pub struct TtsVoiceOption {
 /// `provider` is explicit because the settings page asks right after the user
 /// picks one, before the debounced save has written it — resolving it from the
 /// store would answer about the previous provider and list its voices instead.
+/// `model` is explicit for the same reason: under Alibaba Cloud the two model
+/// families have entirely separate voice tables, so a stale read there is just
+/// as wrong.
 #[tauri::command]
 pub async fn list_tts_voices(
     tts: State<'_, TtsController>,
     provider: Option<String>,
+    model: Option<String>,
 ) -> Result<Vec<TtsVoiceOption>, String> {
     let controller = tts.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || controller.list_voices(provider.as_deref()))
-        .await
-        .map_err(|err| format!("Failed to list voices: {err}"))?
-        .map(|voices| {
-            voices
-                .into_iter()
-                .map(|voice| TtsVoiceOption {
-                    id: voice.id,
-                    name: voice.name,
-                    language: voice.language,
-                })
-                .collect()
-        })
-        .map_err(|err| err.to_string())
+    tauri::async_runtime::spawn_blocking(move || {
+        controller.list_voices(provider.as_deref(), model.as_deref())
+    })
+    .await
+    .map_err(|err| format!("Failed to list voices: {err}"))?
+    .map(|voices| {
+        voices
+            .into_iter()
+            .map(|voice| TtsVoiceOption {
+                id: voice.id,
+                name: voice.name,
+                language: voice.language,
+            })
+            .collect()
+    })
+    .map_err(|err| err.to_string())
 }
 
 /// Speak `text` with the saved voice parameters, bypassing the selection

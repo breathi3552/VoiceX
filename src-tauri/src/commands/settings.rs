@@ -172,7 +172,7 @@ pub struct AppSettings {
     // between them, and the split removes the "is this shared or specific?"
     // question entirely for every provider added later.
     pub tts_enabled: bool,
-    pub tts_provider_type: String, // "system" | "volcengine"
+    pub tts_provider_type: String, // "system" | "volcengine" | "aliyun"
     /// `None` means the built-in default binding (Option+Command+R).
     pub tts_hotkey_config: Option<String>,
     /// Compatibility mode: fall back to a synthetic Cmd-C when the
@@ -202,6 +202,24 @@ pub struct AppSettings {
     /// -50..=100 scale by the backend.
     pub volc_tts_rate: f32,
     pub volc_tts_volume: f32,
+
+    // TTS Provider: Alibaba Cloud Model Studio (百炼)
+    /// A Model Studio key, the same kind the Qwen ASR provider takes. Stored
+    /// separately all the same: sharing one field would mean turning on reading
+    /// silently re-points at whatever key dictation happens to be using.
+    pub aliyun_tts_api_key: String,
+    /// Which model family speaks. The two are separate services with separate
+    /// endpoints and parameter spellings, which the backend maps.
+    pub aliyun_tts_model: String,
+    /// One voice per family, because the ids are not interchangeable — either
+    /// family rejects the other's outright, so a shared key would make every
+    /// model switch fail until the voice was reset by hand.
+    pub aliyun_tts_voice_qwen3: String,
+    pub aliyun_tts_voice_qwen_audio: String,
+    /// Normalized like the system voice's. Both families take the same
+    /// 0.5..=2.0 multiplier, so one pair covers them.
+    pub aliyun_tts_rate: f32,
+    pub aliyun_tts_volume: f32,
 
     // Input
     pub input_device_uid: Option<String>,
@@ -416,6 +434,19 @@ impl Default for AppSettings {
             volc_tts_speaker: crate::tts::volcengine::default_speaker().to_string(),
             volc_tts_rate: 0.5,
             volc_tts_volume: 1.0,
+
+            aliyun_tts_api_key: String::new(),
+            aliyun_tts_model: crate::tts::aliyun::default_model().to_string(),
+            aliyun_tts_voice_qwen3: crate::tts::aliyun::default_voice_for(
+                crate::tts::aliyun::MODEL_QWEN3,
+            )
+            .to_string(),
+            aliyun_tts_voice_qwen_audio: crate::tts::aliyun::default_voice_for(
+                crate::tts::aliyun::MODEL_QWEN_AUDIO,
+            )
+            .to_string(),
+            aliyun_tts_rate: 0.5,
+            aliyun_tts_volume: 1.0,
 
             input_device_uid: None,
             text_injection_mode: "pasteboard".to_string(),
