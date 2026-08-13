@@ -62,15 +62,22 @@ impl MacSayBackend {
             return;
         };
         let _ = child.kill();
-        thread::Builder::new()
+        // Reaped off-thread because this runs on the hotkey worker, which has
+        // dictation's `Pressed` behind it. Failure to spawn is not fatal and
+        // must not panic: `Drop` comes through here during teardown, where a
+        // panic would abort the process over an already-killed child that the
+        // OS is about to reap anyway.
+        let reaper = thread::Builder::new()
             .name("voicex-tts-say-stop".to_string())
             .spawn(move || {
                 let _ = child.wait();
                 if log_cancel {
                     log_event("speak_cancelled", &[]);
                 }
-            })
-            .expect("failed to spawn the say-stop reaper");
+            });
+        if let Err(err) = reaper {
+            log::warn!("Could not spawn the say reaper; the child was killed anyway: {err}");
+        }
     }
 
     fn spawn_waiter(&self, token: CancelToken) {
@@ -83,6 +90,24 @@ impl MacSayBackend {
                         Ok(slot) => slot,
                         Err(_) => return,
                     };
+                    // The slot is shared, so what is in it now is not
+                    // necessarily what this waiter was started for: `start`
+                    // takes the old child out and puts a new one in, and that
+                    // can happen entirely inside one `WAIT_POLL` nap. Reaping
+                    // someone else's child would strand them — their own
+                    // waiter would find the slot empty and return without ever
+                    // finishing the session, leaving the HUD driver spinning
+                    // on a read that already ended.
+                    //
+                    // The token says whose turn it is: a newer request claims
+                    // the session before it calls `start`, so a cancelled
+                    // token means the child below belongs to someone else.
+                    // Checked under the lock, because `start` needs the same
+                    // lock to install the replacement — so if the token is
+                    // still live here, the child in the slot is ours.
+                    if token.is_cancelled() {
+                        return;
+                    }
                     match slot.as_mut().map(Child::try_wait) {
                         Some(Ok(Some(status))) => {
                             let mut child = slot.take().expect("try_wait found an exit");
@@ -241,6 +266,16 @@ impl TtsBackend for MacSayBackend {
         Ok(())
     }
 
+    /// Weaker than [`super::mac_system::MacSystemBackend`]'s: this reports
+    /// `Speaking` once `say` has been spawned, not once audio is audible.
+    /// `say` gives us no start signal, and the process exiting is the only
+    /// thing we can observe — so `speak_started` is logged at spawn here too.
+    ///
+    /// The visible cost is the HUD's `Preparing` phase, which exists to cover
+    /// the silence before a voice begins: on this path it is skipped, and a
+    /// Siri voice loading for the first time shows as "reading" while still
+    /// quiet. Preferred to inventing a delay that would be wrong on every
+    /// machine but the one it was measured on.
     fn status(&self) -> TtsStatus {
         if self.shared.speaking.load(Ordering::SeqCst) {
             TtsStatus::Speaking

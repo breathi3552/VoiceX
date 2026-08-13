@@ -286,9 +286,8 @@ impl TtsController {
     /// a listed id uses AVSpeech. Listing always goes through AVSpeech, so
     /// this is only for actually speaking.
     fn system_backend(&self, settings: Option<&AppSettings>) -> Option<Arc<dyn TtsBackend>> {
-        let use_say = settings
-            .map(|s| s.system_tts_voice_id.trim().is_empty())
-            .unwrap_or(true);
+        // No settings at all is the same as an unset voice, which is `say`.
+        let use_say = settings.map(uses_say_voice).unwrap_or(true);
         if use_say {
             if let Some(say) = self.inner.say.lock().ok().and_then(|slot| slot.clone()) {
                 return Some(say);
@@ -667,6 +666,18 @@ fn load_settings() -> Option<AppSettings> {
     }
 }
 
+/// Whether the local provider speaks through `say` rather than AVSpeech.
+///
+/// An unset system voice means "whatever Spoken Content is set to", which only
+/// `/usr/bin/say` can reach — not AVSpeech's locale compact voice. Two
+/// decisions hang off this and have to agree: which backend speaks, and which
+/// parameters the request is allowed to carry. Answering it in one place is
+/// what keeps them from drifting into a request that names a voice the chosen
+/// engine cannot use.
+fn uses_say_voice(settings: &AppSettings) -> bool {
+    settings.system_tts_voice_id.trim().is_empty()
+}
+
 /// Build a request from the selected provider's own settings.
 ///
 /// Every synthesis parameter is per provider, not just the voice id. Engines
@@ -697,20 +708,14 @@ fn voice_request(settings: &AppSettings, text: String) -> TtsRequest {
             None,
         ),
         _ => {
-            let empty = settings.system_tts_voice_id.trim().is_empty();
+            // `say` has no flag for either, so sending them would be sending a
+            // value the engine drops on the floor.
+            let say = uses_say_voice(settings);
             (
                 settings.system_tts_voice_id.clone(),
                 settings.system_tts_rate,
-                if empty {
-                    None
-                } else {
-                    Some(settings.system_tts_volume)
-                },
-                if empty {
-                    None
-                } else {
-                    Some(settings.system_tts_pitch)
-                },
+                (!say).then_some(settings.system_tts_volume),
+                (!say).then_some(settings.system_tts_pitch),
             )
         }
     };
