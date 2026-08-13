@@ -20,8 +20,10 @@ use tokio::process::Command;
 use super::config::AsrConfig;
 use super::protocol::AsrError;
 
-#[cfg(target_os = "windows")]
-use std::os::windows::process::CommandExt;
+/// Keep the child from flashing a console window. `tokio::process::Command`
+/// carries `creation_flags` itself on Windows, so no extension trait is needed
+/// — importing `std::os::windows::process::CommandExt` for it only produced an
+/// unused-import warning in the Windows build.
 #[cfg(target_os = "windows")]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
