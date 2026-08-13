@@ -79,6 +79,11 @@ const isAliyun = computed(() => settingsStore.settings.ttsProviderType === 'aliy
 // macOS" — voice list availability, the missing pitch control, whether the
 // controls work off macOS at all.
 const isCloud = computed(() => isVolcengine.value || isAliyun.value)
+// Empty id is the `say` path (Siri / Spoken Content). Compact AVSpeech voices
+// are everything else in the picker; pitch and volume only exist there.
+const isSystemDefaultVoice = computed(
+  () => !isCloud.value && !settingsStore.settings.systemTtsVoiceId
+)
 
 const aliyunModelOptions = computed(() => [
   { label: t('reading.aliyunModelQwen3'), value: 'qwen3-tts-flash' },
@@ -512,7 +517,13 @@ onBeforeUnmount(() => {
           <div class="field-text">
             <div class="field-label">{{ t('reading.voiceLabel') }}</div>
             <div class="field-note">
-              {{ isCloud ? t('reading.cloudSpeakerNote') : t('reading.voiceNote') }}
+              {{
+                isCloud
+                  ? t('reading.cloudSpeakerNote')
+                  : isSystemDefaultVoice
+                    ? t('reading.voiceNoteDefault')
+                    : t('reading.voiceNote')
+              }}
             </div>
           </div>
           <NSelect
@@ -547,11 +558,12 @@ onBeforeUnmount(() => {
           </div>
         </div>
 
-        <!-- No cloud engine here exposes a usable pitch: Volcengine's
-             audio_params carry none, and Alibaba Cloud's pitch_rate stretched a
-             sample to 4.2x when halved, so what it changes is not pitch alone.
-             Either way the row would be a control that lies. -->
-        <div v-if="!isCloud" class="field-row">
+        <!-- Pitch and volume exist on compact AVSpeech voices, not on `say`.
+             Hiding the rows when the system default is selected is honest:
+             `say` has no flags for either, and a slider that does nothing
+             would look like a broken setting. Cloud volume is local playback
+             gain, so that row stays. -->
+        <div v-if="!isCloud && !isSystemDefaultVoice" class="field-row">
           <div class="field-text">
             <div class="field-label">{{ t('reading.pitch') }}</div>
           </div>
@@ -568,7 +580,7 @@ onBeforeUnmount(() => {
           </div>
         </div>
 
-        <div class="field-row">
+        <div v-if="isCloud || !isSystemDefaultVoice" class="field-row">
           <div class="field-text">
             <div class="field-label">{{ t('reading.volume') }}</div>
           </div>

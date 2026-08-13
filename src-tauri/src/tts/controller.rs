@@ -49,8 +49,11 @@ const PROVIDER_ALIYUN: &str = "aliyun";
 #[derive(Default)]
 struct ControllerInner {
     app: Mutex<Option<AppHandle>>,
-    /// The macOS system voice. Absent on other platforms.
+    /// Compact macOS voices via AVSpeechSynthesizer. Absent on other platforms.
     system: Mutex<Option<Arc<dyn TtsBackend>>>,
+    /// Spoken Content / Siri voice via `/usr/bin/say`. Used when the system
+    /// provider is selected and the voice id is empty. Absent on other platforms.
+    say: Mutex<Option<Arc<dyn TtsBackend>>>,
     /// Kept as their concrete types so credentials can be re-applied without
     /// rebuilding them — the settings page changes them while the app runs.
     volcengine: Mutex<Option<Arc<VolcengineBackend>>>,
@@ -94,6 +97,10 @@ impl TtsController {
                 Arc::new(super::mac_system::MacSystemBackend::new(app.clone()));
             if let Ok(mut slot) = self.inner.system.lock() {
                 *slot = Some(backend);
+            }
+            let say: Arc<dyn TtsBackend> = Arc::new(super::mac_say::MacSayBackend::new());
+            if let Ok(mut slot) = self.inner.say.lock() {
+                *slot = Some(say);
             }
         }
 
@@ -272,6 +279,21 @@ impl TtsController {
             _ => {}
         }
 
+        self.system_backend(settings)
+    }
+
+    /// Local speak path: empty voice id uses `say` (Siri / Spoken Content);
+    /// a listed id uses AVSpeech. Listing always goes through AVSpeech, so
+    /// this is only for actually speaking.
+    fn system_backend(&self, settings: Option<&AppSettings>) -> Option<Arc<dyn TtsBackend>> {
+        let use_say = settings
+            .map(|s| s.system_tts_voice_id.trim().is_empty())
+            .unwrap_or(true);
+        if use_say {
+            if let Some(say) = self.inner.say.lock().ok().and_then(|slot| slot.clone()) {
+                return Some(say);
+            }
+        }
         self.inner.system.lock().ok().and_then(|slot| slot.clone())
     }
 
@@ -321,6 +343,19 @@ impl TtsController {
         let provider = provider
             .or_else(|| settings.as_ref().map(|s| s.tts_provider_type.as_str()))
             .unwrap_or_default();
+        // Compact ids come from AVSpeech even when the default speak path is
+        // `say`. The picker needs those ids; the empty entry is added in the
+        // UI and is not a listed voice.
+        if provider != PROVIDER_VOLCENGINE && provider != PROVIDER_ALIYUN {
+            return self
+                .inner
+                .system
+                .lock()
+                .ok()
+                .and_then(|slot| slot.clone())
+                .ok_or(TtsError::Unsupported)
+                .and_then(|backend| backend.list_voices());
+        }
         self.backend_for(provider, settings.as_ref())
             .ok_or(TtsError::Unsupported)
             .and_then(|backend| backend.list_voices())
@@ -640,38 +675,51 @@ fn load_settings() -> Option<AppSettings> {
 /// never reopens the question of which settings are shared.
 ///
 /// Rate and volume are stored normalized (0..=1) on both sides and each backend
-/// maps them onto its own scale. Pitch exists only for the system voice, so a
-/// cloud request carries `None` rather than a value that would be dropped.
+/// maps them onto its own scale. Pitch exists only for compact system voices
+/// (AVSpeech). Cloud engines and the empty-id `say` path carry `None` rather
+/// than a value that would be dropped.
 ///
 /// An empty voice id means "backend default", which is not the same as a voice
-/// literally named "".
+/// literally named "". For the system provider that default is `say` without
+/// `-v`, not AVSpeech's locale compact voice.
 fn voice_request(settings: &AppSettings, text: String) -> TtsRequest {
     let (voice, rate, volume, pitch) = match settings.tts_provider_type.as_str() {
         PROVIDER_VOLCENGINE => (
             settings.volc_tts_speaker.clone(),
             settings.volc_tts_rate,
-            settings.volc_tts_volume,
+            Some(settings.volc_tts_volume),
             None,
         ),
         PROVIDER_ALIYUN => (
             aliyun_voice(settings),
             settings.aliyun_tts_rate,
-            settings.aliyun_tts_volume,
+            Some(settings.aliyun_tts_volume),
             None,
         ),
-        _ => (
-            settings.system_tts_voice_id.clone(),
-            settings.system_tts_rate,
-            settings.system_tts_volume,
-            Some(settings.system_tts_pitch),
-        ),
+        _ => {
+            let empty = settings.system_tts_voice_id.trim().is_empty();
+            (
+                settings.system_tts_voice_id.clone(),
+                settings.system_tts_rate,
+                if empty {
+                    None
+                } else {
+                    Some(settings.system_tts_volume)
+                },
+                if empty {
+                    None
+                } else {
+                    Some(settings.system_tts_pitch)
+                },
+            )
+        }
     };
 
     TtsRequest {
         text,
         voice: Some(voice).filter(|id| !id.trim().is_empty()),
         rate: Some(rate),
-        volume: Some(volume),
+        volume,
         pitch,
     }
 }
@@ -741,13 +789,26 @@ mod tests {
 
     #[test]
     fn voice_parameters_reach_the_request_on_their_stored_scales() {
-        // Rate and volume stay normalized; pitch keeps the engine's own scale,
-        // where 1.0 is neutral rather than the midpoint of the range.
+        // Empty system voice is the `say` path: rate still applies, volume and
+        // pitch do not exist on that engine so they stay `None`.
         let settings = AppSettings::default();
         let request = voice_request(&settings, "hi".to_string());
         assert_eq!(request.rate, Some(0.5), "0.5 is the engine's 1x mark");
-        assert_eq!(request.volume, Some(1.0));
-        assert_eq!(request.pitch, Some(1.0));
+        assert_eq!(request.volume, None);
+        assert_eq!(request.pitch, None);
+    }
+
+    #[test]
+    fn a_listed_system_voice_keeps_pitch_and_volume() {
+        // Compact AVSpeech voices honour both; sending them only then means a
+        // value is never silently dropped on the `say` path.
+        let mut settings = AppSettings::default();
+        settings.system_tts_voice_id = "com.apple.voice.compact.zh-CN.Tingting".to_string();
+        settings.system_tts_volume = 0.4;
+        settings.system_tts_pitch = 1.2;
+        let request = voice_request(&settings, "hi".to_string());
+        assert_eq!(request.volume, Some(0.4));
+        assert_eq!(request.pitch, Some(1.2));
     }
 
     #[test]

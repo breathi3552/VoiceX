@@ -4,10 +4,16 @@
 //! macOS system voice implements it directly (it speaks without ever producing
 //! audio bytes); a cloud backend composes synthesis and playback behind the
 //! same trait.
+//!
+//! On macOS the empty-id "system default" path goes through [`mac_say`] so it
+//! can use the Spoken Content / Siri voice; a listed compact voice still goes
+//! through [`mac_system`].
 
 pub mod aliyun;
 pub mod controller;
 pub mod decode;
+#[cfg(target_os = "macos")]
+pub mod mac_say;
 #[cfg(target_os = "macos")]
 pub mod mac_system;
 pub mod playback;
