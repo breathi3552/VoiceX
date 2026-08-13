@@ -210,7 +210,7 @@ const enUS = {
     diagnosticsRun: 'Run diagnostics',
     diagnosticsHint: 'After clicking, switch back to the target application and select some text within 5 seconds. The report describes how the read went and never contains the text itself.',
     diagnosticsCountdown: 'Reading in {seconds}s…',
-    unsupportedPlatform: 'Read selection is not available on this platform yet.'
+    unsupportedPlatform: 'Read selection is not available on this platform yet — reading the selection out of another application is implemented for macOS only. The hotkey below is not registered here, so it still reaches the foreground application.'
   },
   sync: {
     title: 'Sync',
@@ -333,6 +333,7 @@ const enUS = {
     providerSub: 'Select the speech recognition provider',
     asrProvider: 'ASR Provider',
     warningColiUnavailable: 'The current setting still points to local `coli`, but no usable command was detected. Local ASR will not work when recording starts. Install or fix the `coli` path, or switch back to an online provider.',
+    warningQwenLocalUnsupported: 'The current setting still points to Qwen3-ASR (Local), which is not available on Windows — the `qwen-asr` CLI it drives is macOS / Linux only. Recognition will fail until you switch to another provider.',
     apiCredentials: 'API Credentials',
     googleCloudConfiguration: 'Google Cloud Configuration',
     googleCloudConfigurationSub: 'Authenticate with a Service Account key. Create one in GCP Console → IAM → Service Accounts and paste the JSON content here.',
@@ -505,6 +506,7 @@ const enUS = {
     providerStepAudio: 'StepAudio 2.5 ASR',
     providerMimo: 'Xiaomi MiMo ASR',
     providerQwenLocal: 'Qwen3-ASR (Local)',
+    providerQwenLocalUnsupported: 'Qwen3-ASR (Local) - macOS / Linux only',
     qwenLocalConfiguration: 'Qwen3-ASR Local Configuration',
     qwenLocalConfigurationSub: 'Offline recognition on this machine via the external `qwen-asr` CLI; nothing leaves your device. Currently whole-utterance only (text appears after you release the hotkey) — the CLI emits output just once, at the end.',
     qwenLocalModelDir: 'Model Directory',

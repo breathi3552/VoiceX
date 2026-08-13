@@ -6,6 +6,7 @@ import { NButton, NInput, NSelect, NSlider, NSwitch } from 'naive-ui'
 import { useI18n } from 'vue-i18n'
 import { useSettingsStore } from '../stores/settings'
 import { formatHotkey } from '../utils/hotkey'
+import { isMacOS } from '../utils/platform'
 
 interface TtsVoiceOption {
   id: string
@@ -26,10 +27,6 @@ const DEFAULT_RATE = 0.5
 
 const settingsStore = useSettingsStore()
 const { t } = useI18n()
-
-const isMacOS =
-  navigator.platform?.toLowerCase().includes('mac') ||
-  navigator.userAgent?.toLowerCase().includes('mac')
 
 const voices = ref<TtsVoiceOption[]>([])
 const voicesError = ref('')

@@ -210,7 +210,7 @@ const zhCN = {
     diagnosticsRun: '开始诊断',
     diagnosticsHint: '点击后请在 5 秒内切回目标应用并选中一段文字。报告只含取词过程的信息，不含你选中的文字。',
     diagnosticsCountdown: '{seconds} 秒后读取…',
-    unsupportedPlatform: '当前平台暂不支持选中朗读。'
+    unsupportedPlatform: '当前平台暂不支持选中朗读——从其他应用取词目前只在 macOS 上实现。下面的热键在这里不会注册，按下时仍然交给前台应用。'
   },
   sync: {
     title: '同步',
@@ -333,6 +333,7 @@ const zhCN = {
     providerSub: '选择语音识别服务供应商',
     asrProvider: 'ASR Provider',
     warningColiUnavailable: '当前设置仍指向本地 `coli`，但系统没有检测到可用命令。开始录音时本地 ASR 不会工作；请安装或修正 `coli` 路径，或切换回在线 provider。',
+    warningQwenLocalUnsupported: '当前设置仍指向 Qwen3-ASR（本地），但 Windows 上不提供该 provider —— 它依赖的 `qwen-asr` CLI 目前只支持 macOS / Linux。在切换到其他 provider 之前，识别都会失败。',
     apiCredentials: 'API 凭证',
     googleCloudConfiguration: 'Google Cloud 配置',
     googleCloudConfigurationSub: '使用 Service Account 密钥认证，在 GCP Console → IAM → Service Accounts 中创建密钥并粘贴 JSON 内容',
@@ -505,6 +506,7 @@ const zhCN = {
     providerStepAudio: 'StepAudio 2.5 ASR',
     providerMimo: '小米 MiMo ASR',
     providerQwenLocal: 'Qwen3-ASR（本地）',
+    providerQwenLocalUnsupported: 'Qwen3-ASR（本地）- 仅 macOS / Linux',
     qwenLocalConfiguration: 'Qwen3-ASR 本地配置',
     qwenLocalConfigurationSub: '通过外部 `qwen-asr` CLI 在本机离线识别，不联网。当前为整段识别（松开热键后出字），暂不支持边说边出字——CLI 只在结束时输出一次。',
     qwenLocalModelDir: '模型目录',

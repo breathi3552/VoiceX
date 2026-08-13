@@ -20,7 +20,10 @@ type ProviderOption<T extends string> = {
 
 type Translate = (key: string) => string
 
-const ASR_PROVIDER_LABEL_KEYS: Array<{ key: string; value: Exclude<AsrProviderValue, 'coli'> }> = [
+const ASR_PROVIDER_LABEL_KEYS: Array<{
+  key: string
+  value: Exclude<AsrProviderValue, 'coli'>
+}> = [
   { key: 'asr.providerVolcengine', value: 'volcengine' },
   { key: 'asr.providerGoogle', value: 'google' },
   { key: 'asr.providerFunAsr', value: 'funasr' },
@@ -74,13 +77,23 @@ export function buildAsrProviderOptions(
   options: {
     coliLabel?: string
     coliDisabled?: boolean
+    qwenLocalLabel?: string
+    qwenLocalDisabled?: boolean
   } = {}
 ): Array<ProviderOption<AsrProviderValue>> {
   return [
-    ...ASR_PROVIDER_LABEL_KEYS.map(({ key, value }) => ({
-      label: t(key),
-      value
-    })),
+    ...ASR_PROVIDER_LABEL_KEYS.map(({ key, value }) =>
+      value === 'qwen-local'
+        ? {
+            label: options.qwenLocalLabel ?? t(key),
+            value,
+            disabled: options.qwenLocalDisabled
+          }
+        : {
+            label: t(key),
+            value
+          }
+    ),
     {
       label: options.coliLabel ?? t('asr.providerColi'),
       value: 'coli',

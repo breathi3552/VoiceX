@@ -1,6 +1,4 @@
-// Platform detection - check if running on macOS
-const isMacOS = navigator.platform?.toLowerCase().includes('mac') ||
-  navigator.userAgent?.toLowerCase().includes('mac');
+import { isMacOS } from './platform';
 
 // Platform-specific display names
 const ctrlDisplayName = isMacOS ? 'Control' : 'Ctrl';

@@ -6,6 +6,7 @@ import { useI18n } from 'vue-i18n'
 import { useSettingsStore } from '../stores/settings'
 import type { LocalAsrStatus } from '../types/asr'
 import { buildAsrProviderOptions, type AsrProviderValue as ProviderValue } from '../utils/providerOptions'
+import { isWindows } from '../utils/platform'
 import AsrVolcengineSettings from '../components/asr/AsrVolcengineSettings.vue'
 import AsrGoogleSettings from '../components/asr/AsrGoogleSettings.vue'
 import AsrFunAsrSettings from '../components/asr/AsrFunAsrSettings.vue'
@@ -75,10 +76,19 @@ onMounted(() => {
 })
 
 // --- Provider selection ---
+// The `qwen-asr` CLI this provider drives builds against Accelerate/vDSP by
+// default and its live capture is documented as macOS-only, so we have never
+// had a working Windows binary to point at. Offering the option there would
+// only produce a "command not found" at the first hotkey press.
+const qwenLocalUnsupported = isWindows
+
 const asrProviderType = computed({
   get: () => settingsStore.settings.asrProviderType,
   set: (v: ProviderValue) => {
     if (v === 'coli' && coliStatus.value && !coliStatus.value.available) {
+      return
+    }
+    if (v === 'qwen-local' && qwenLocalUnsupported) {
       return
     }
     settingsStore.updateSetting('asrProviderType', v)
@@ -117,9 +127,20 @@ const providerOptions = computed(() => {
 
   return buildAsrProviderOptions(t, {
     coliLabel,
-    coliDisabled: !coliDetected && settingsStore.settings.asrProviderType !== 'coli'
+    coliDisabled: !coliDetected && settingsStore.settings.asrProviderType !== 'coli',
+    qwenLocalLabel: qwenLocalUnsupported ? t('asr.providerQwenLocalUnsupported') : undefined,
+    // Still selectable if it somehow already is the provider — a config synced
+    // from a Mac can name it — so the picker keeps showing what is in effect.
+    qwenLocalDisabled:
+      qwenLocalUnsupported && settingsStore.settings.asrProviderType !== 'qwen-local'
   })
 })
+
+// Reachable only through a synced or hand-edited config; the picker cannot get
+// here on its own.
+const showQwenLocalUnsupportedWarning = computed(
+  () => qwenLocalUnsupported && settingsStore.settings.asrProviderType === 'qwen-local'
+)
 
 const showColiUnavailableWarning = computed(() =>
   settingsStore.settings.asrProviderType === 'coli' &&
@@ -324,6 +345,9 @@ async function clearSonioxDebugOverrides() {
         </div>
         <div v-if="showColiUnavailableWarning" class="warning-box">
           {{ t('asr.warningColiUnavailable') }}
+        </div>
+        <div v-if="showQwenLocalUnsupportedWarning" class="warning-box">
+          {{ t('asr.warningQwenLocalUnsupported') }}
         </div>
       </div>
     </div>

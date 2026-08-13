@@ -42,6 +42,8 @@ impl QwenLocalAsrClient {
     }
 
     pub async fn transcribe_file(&self, path: &Path) -> Result<String, AsrError> {
+        check_platform_support()?;
+
         let program = resolve_qwen_local_command(&self.config.qwen_local_command_path)
             .map_err(AsrError::ConnectionFailed)?;
 
@@ -129,6 +131,28 @@ impl QwenLocalAsrClient {
 
         Ok(text)
     }
+}
+
+/// Refuse the provider on Windows, before anything goes looking for a binary.
+///
+/// The settings page does not offer it there, but settings sync means a Windows
+/// install can inherit the choice from a Mac. Saying why it cannot run beats
+/// letting the PATH search answer "`qwen-asr` was not found": the binary is not
+/// missing, it does not exist for this platform. `qwen-asr-cli` defaults to
+/// `qwen-asr/vdsp`, i.e. Accelerate, and its live capture is documented as
+/// macOS-only — we have never had a Windows build to point at.
+#[cfg(target_os = "windows")]
+fn check_platform_support() -> Result<(), AsrError> {
+    Err(AsrError::ConnectionFailed(
+        "Qwen local ASR is not available on Windows: the `qwen-asr` CLI it drives is \
+         macOS / Linux only. Pick another ASR provider in settings."
+            .to_string(),
+    ))
+}
+
+#[cfg(not(target_os = "windows"))]
+fn check_platform_support() -> Result<(), AsrError> {
+    Ok(())
 }
 
 /// Audio handed to the CLI, in the one format it accepts.

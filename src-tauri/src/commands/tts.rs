@@ -85,6 +85,17 @@ pub async fn apply_read_selection_hotkey(
     config: Option<String>,
     enabled: bool,
 ) -> Result<ReadSelectionStatus, String> {
+    // Same rule as startup (`lib.rs`): bind only where a selection reader
+    // exists. Off macOS the key would be swallowed from the foreground
+    // application in exchange for a `platform_unsupported` error. The settings
+    // page already refuses to send this, so this is the case where a synced
+    // `ttsEnabled` reaches a platform that cannot honour it.
+    #[cfg(not(target_os = "macos"))]
+    let (config, enabled) = {
+        let _ = (config, enabled);
+        (None::<String>, false)
+    };
+
     let binding = if enabled {
         Some(
             config
