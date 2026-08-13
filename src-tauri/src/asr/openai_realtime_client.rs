@@ -89,7 +89,9 @@ impl OpenAIRealtimeClient {
             .send(Message::Text(session_update.to_string()))
             .await
             .map_err(|e| {
-                AsrError::ConnectionFailed(format!("Failed to send OpenAI Realtime session.update: {e}"))
+                AsrError::ConnectionFailed(format!(
+                    "Failed to send OpenAI Realtime session.update: {e}"
+                ))
             })?;
 
         loop {
@@ -351,7 +353,6 @@ impl OpenAIRealtimeClient {
             }
         }
     }
-
 }
 
 /// Build the GA realtime WebSocket URL.
@@ -776,7 +777,8 @@ mod tests {
         // against the real API during protocol changes.
         println!(
             "{}",
-            serde_json::to_string(&build_session_update_event(&config("gpt-live-transcribe"))).unwrap()
+            serde_json::to_string(&build_session_update_event(&config("gpt-live-transcribe")))
+                .unwrap()
         );
     }
 }

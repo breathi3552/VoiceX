@@ -10,8 +10,8 @@ use crate::asr::{
     ColiRefinementMode, ElevenLabsRealtimeClient, ElevenLabsRecognitionMode,
     ElevenLabsTranscriptionClient, FunAsrRealtimeClient, GeminiLiveClient,
     GeminiTranscriptionClient, GoogleSttClient, MimoTranscriptionClient, OpenAIRealtimeClient,
-    OpenAITranscriptionClient, QwenLocalAsrClient, QwenRealtimeClient, QwenRecognitionMode, QwenTranscriptionClient,
-    SonioxClient, StepAudioTranscriptionClient,
+    OpenAITranscriptionClient, QwenLocalAsrClient, QwenRealtimeClient, QwenRecognitionMode,
+    QwenTranscriptionClient, SonioxClient, StepAudioTranscriptionClient,
 };
 use crate::services::history_service::HistoryService;
 

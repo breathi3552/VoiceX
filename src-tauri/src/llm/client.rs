@@ -60,7 +60,9 @@ impl LLMClient {
         let user_message = format!("原文：\n{}", text);
 
         if self.config.provider_type == super::config::LLMProviderType::Gemini {
-            return self.correct_with_gemini(&system_prompt, &user_message).await;
+            return self
+                .correct_with_gemini(&system_prompt, &user_message)
+                .await;
         }
 
         match self.config.api_mode {
@@ -132,10 +134,19 @@ impl LLMClient {
         user_message: &str,
     ) -> Result<String, LLMError> {
         let base_url = self.config.base_url.trim_end_matches('/');
-        let url = if base_url.ends_with("/v1beta") || base_url.ends_with("/v1") || base_url.ends_with("/v1alpha") {
-            format!("{}/models/{}:generateContent", base_url, self.config.model_name)
+        let url = if base_url.ends_with("/v1beta")
+            || base_url.ends_with("/v1")
+            || base_url.ends_with("/v1alpha")
+        {
+            format!(
+                "{}/models/{}:generateContent",
+                base_url, self.config.model_name
+            )
         } else {
-            format!("{}/v1beta/models/{}:generateContent", base_url, self.config.model_name)
+            format!(
+                "{}/v1beta/models/{}:generateContent",
+                base_url, self.config.model_name
+            )
         };
 
         let messages = vec![
@@ -192,33 +203,26 @@ impl LLMClient {
             req_builder = req_builder.bearer_auth(&self.config.api_key);
         }
 
-        let response = req_builder
-            .body(request_body)
-            .send()
-            .await
-            .map_err(|e| {
-                log::info!(
-                    "LLM request failed after {}ms: {}",
-                    started_at.elapsed().as_millis(),
-                    e
-                );
-                LLMError::HttpError(e.to_string())
-            })?;
+        let response = req_builder.body(request_body).send().await.map_err(|e| {
+            log::info!(
+                "LLM request failed after {}ms: {}",
+                started_at.elapsed().as_millis(),
+                e
+            );
+            LLMError::HttpError(e.to_string())
+        })?;
 
         let headers_ms = started_at.elapsed().as_millis();
         let status = response.status();
-        let bytes = response
-            .bytes()
-            .await
-            .map_err(|e| {
-                log::info!(
-                    "LLM body read failed after {}ms (headers={}ms): {}",
-                    started_at.elapsed().as_millis(),
-                    headers_ms,
-                    e
-                );
-                LLMError::HttpError(e.to_string())
-            })?;
+        let bytes = response.bytes().await.map_err(|e| {
+            log::info!(
+                "LLM body read failed after {}ms (headers={}ms): {}",
+                started_at.elapsed().as_millis(),
+                headers_ms,
+                e
+            );
+            LLMError::HttpError(e.to_string())
+        })?;
         let total_ms = started_at.elapsed().as_millis();
         let body_text = String::from_utf8_lossy(&bytes).to_string();
         log::info!(

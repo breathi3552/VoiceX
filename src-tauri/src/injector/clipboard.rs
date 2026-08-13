@@ -443,12 +443,13 @@ impl TextInjector {
 
         let post_key =
             |keycode: u16, keydown: bool, flags: CGEventFlags| -> Result<(), InjectorError> {
-                let event =
-                    CGEvent::new_keyboard_event(source.clone(), keycode, keydown).map_err(|_| {
+                let event = CGEvent::new_keyboard_event(source.clone(), keycode, keydown).map_err(
+                    |_| {
                         InjectorError::PasteCommandFailed(
                             "CGEvent::new_keyboard_event failed".to_string(),
                         )
-                    })?;
+                    },
+                )?;
                 event.set_integer_value_field(
                     EventField::EVENT_SOURCE_USER_DATA,
                     i64::from(enigo::EVENT_MARKER),

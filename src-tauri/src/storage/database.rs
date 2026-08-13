@@ -849,16 +849,16 @@ pub fn get_settings() -> Result<AppSettings, StorageError> {
                             Ok(settings)
                         }
                         Err(e) => {
-                            log::warn!(
-                                "Failed to parse settings, falling back to defaults: {}",
-                                e
-                            );
+                            log::warn!("Failed to parse settings, falling back to defaults: {}", e);
                             Ok(AppSettings::default())
                         }
                     }
                 }
                 Err(e) => {
-                    log::warn!("Failed to parse settings JSON, falling back to defaults: {}", e);
+                    log::warn!(
+                        "Failed to parse settings JSON, falling back to defaults: {}",
+                        e
+                    );
                     Ok(AppSettings::default())
                 }
             }

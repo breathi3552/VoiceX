@@ -411,7 +411,10 @@ fn build_prompt(config: &AsrConfig) -> Option<String> {
         return None;
     }
 
-    Some(format!("Technical terms that may appear: {}", words.join(", ")))
+    Some(format!(
+        "Technical terms that may appear: {}",
+        words.join(", ")
+    ))
 }
 
 #[cfg(test)]
@@ -457,7 +460,11 @@ mod tests {
     #[test]
     fn configured_directory_is_searched_for_the_binary() {
         // Users naturally type the containing directory rather than the binary.
-        let dir = std::env::current_exe().unwrap().parent().unwrap().to_path_buf();
+        let dir = std::env::current_exe()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .to_path_buf();
         let err = resolve_qwen_local_command(dir.to_str().unwrap()).unwrap_err();
         assert!(
             err.contains("is a directory that does not contain"),
@@ -480,7 +487,10 @@ mod tests {
         let prepared = PreparedAudio::for_input(&wav).unwrap();
         assert_eq!(prepared.path(), wav.as_path());
         drop(prepared);
-        assert!(wav.is_file(), "passthrough must not delete the caller's file");
+        assert!(
+            wav.is_file(),
+            "passthrough must not delete the caller's file"
+        );
 
         // Something that is neither WAV nor decodable must report the reason
         // rather than silently handing garbage to the CLI.
@@ -529,7 +539,10 @@ mod tests {
         if !expected.is_file() {
             return; // qwen-asr not installed on this machine; nothing to assert.
         }
-        assert_eq!(resolve_qwen_local_command("~/.cargo/bin").unwrap(), expected);
+        assert_eq!(
+            resolve_qwen_local_command("~/.cargo/bin").unwrap(),
+            expected
+        );
         assert_eq!(
             resolve_qwen_local_command("~/.cargo/bin/qwen-asr").unwrap(),
             expected
@@ -613,6 +626,9 @@ mod tests {
         let mut c = config();
         c.hotwords = (0..200).map(|i| format!("word{i}")).collect();
         let prompt = build_prompt(&c).unwrap();
-        assert_eq!(prompt.matches(", ").count(), QWEN_LOCAL_MAX_PROMPT_HOTWORDS - 1);
+        assert_eq!(
+            prompt.matches(", ").count(),
+            QWEN_LOCAL_MAX_PROMPT_HOTWORDS - 1
+        );
     }
 }

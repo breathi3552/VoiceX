@@ -81,7 +81,7 @@ pub struct AppSettings {
     pub openai_asr_base_url: String,
     pub openai_asr_language: String,
     pub openai_asr_prompt: String,
-    pub openai_asr_mode: String,                  // "batch" | "realtime"
+    pub openai_asr_mode: String, // "batch" | "realtime"
     // "" | "minimal" | "low" | "medium" | "high" | "xhigh" (realtime only)
     pub openai_asr_delay: String,
     pub openai_asr_post_recording_refine: String, // "off" | "batch_refine"
@@ -1086,14 +1086,20 @@ mod tests {
         assert_eq!(blob["ttsEnabled"], false);
         assert_eq!(blob["ttsHotkeyConfig"], "83|2304|0");
         assert_eq!(blob["ttsClipboardFallback"], false);
-        assert_eq!(blob["systemTtsVoiceId"], "com.apple.voice.compact.zh-CN.Tingting");
+        assert_eq!(
+            blob["systemTtsVoiceId"],
+            "com.apple.voice.compact.zh-CN.Tingting"
+        );
         assert_eq!(blob["volcTtsSpeaker"], "zh_male_liufei_uranus_bigtts");
 
         let restored: AppSettings = serde_json::from_str(&json).unwrap();
         assert!(!restored.tts_enabled);
         assert_eq!(restored.system_tts_rate, 0.75);
         assert_eq!(restored.system_tts_pitch, 1.4);
-        assert_eq!(restored.volc_tts_rate, 0.3, "each provider keeps its own rate");
+        assert_eq!(
+            restored.volc_tts_rate, 0.3,
+            "each provider keeps its own rate"
+        );
         assert_eq!(restored.tts_hotkey_config.as_deref(), Some("83|2304|0"));
     }
 

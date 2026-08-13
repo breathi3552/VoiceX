@@ -263,11 +263,17 @@ mod tests {
 
         // Field names are what someone reads in a pasted report and what the
         // settings page renders, so renaming one is a breaking change.
-        assert!(json.contains("\"appBundleId\":\"com.example.app\""), "{json}");
+        assert!(
+            json.contains("\"appBundleId\":\"com.example.app\""),
+            "{json}"
+        );
         assert!(json.contains("\"focusedRole\":\"AXTextArea\""), "{json}");
         assert!(json.contains("\"axStatus\":-25212"), "{json}");
         assert!(json.contains("\"usedClipboardFallback\":true"), "{json}");
-        assert!(!json.contains("text\":\""), "no selected text may appear: {json}");
+        assert!(
+            !json.contains("text\":\""),
+            "no selected text may appear: {json}"
+        );
     }
 
     #[test]

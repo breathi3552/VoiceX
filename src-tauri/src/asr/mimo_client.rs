@@ -341,8 +341,7 @@ fn wav_to_pcm16_mono_16k(bytes: &[u8]) -> Result<Vec<u8>, AsrError> {
     let mut pos = 12;
     while pos + 8 <= bytes.len() {
         let chunk_id = &bytes[pos..pos + 4];
-        let chunk_size =
-            u32::from_le_bytes(bytes[pos + 4..pos + 8].try_into().unwrap()) as usize;
+        let chunk_size = u32::from_le_bytes(bytes[pos + 4..pos + 8].try_into().unwrap()) as usize;
         let body_start = pos + 8;
         let body_end = body_start.saturating_add(chunk_size).min(bytes.len());
         match chunk_id {
@@ -536,9 +535,8 @@ mod tests {
 
     #[test]
     fn extracts_transcript_from_string_content() {
-        let response = parse(
-            r#"{"choices":[{"message":{"role":"assistant","content":"你好，世界。"}}]}"#,
-        );
+        let response =
+            parse(r#"{"choices":[{"message":{"role":"assistant","content":"你好，世界。"}}]}"#);
         assert_eq!(extract_text(response).unwrap(), "你好，世界。");
     }
 

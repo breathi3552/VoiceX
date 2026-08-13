@@ -307,6 +307,9 @@ mod tests {
     #[test]
     fn keywords_respect_the_cap() {
         let input: Vec<String> = (0..150).map(|i| format!("word{i}")).collect();
-        assert_eq!(cleaned_openai_keywords(&input).len(), super::OPENAI_MAX_KEYWORDS);
+        assert_eq!(
+            cleaned_openai_keywords(&input).len(),
+            super::OPENAI_MAX_KEYWORDS
+        );
     }
 }

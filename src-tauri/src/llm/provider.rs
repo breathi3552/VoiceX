@@ -181,7 +181,11 @@ impl LLMProvider for GeminiProvider {
                     "parts": [{ "text": msg.content }]
                 }));
             } else {
-                let role = if msg.role == "assistant" { "model" } else { "user" };
+                let role = if msg.role == "assistant" {
+                    "model"
+                } else {
+                    "user"
+                };
                 contents.push(serde_json::json!({
                     "role": role,
                     "parts": [{ "text": msg.content }]
