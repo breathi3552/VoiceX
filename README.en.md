@@ -49,7 +49,7 @@ press **Escape**, to stop immediately.
 | | Detail |
 |---|---|
 | **How text is read** | Straight from the Accessibility API where possible (8–15 ms); otherwise it falls back to a synthetic Command + C and restores your clipboard afterwards. The fallback can be switched off, at the cost of Safari and VS Code support |
-| **Speech engines** | The system voice (offline, no setup), Volcengine Doubao Seed-TTS 2.0, or Alibaba Cloud Model Studio (`qwen3-tts-flash`, 48 voices including Beijing, Shanghai, Sichuan and Cantonese; `qwen-audio-3.0-tts-flash` for longer text per read). Both cloud engines stream, so speech starts roughly 0.4–0.6 s after the hotkey. Voice, rate and volume are stored per engine |
+| **Speech engines** | The system voice (offline, no setup — by default the one from System Settings → Accessibility → Spoken Content, usually a Siri voice on current macOS), Volcengine Doubao Seed-TTS 2.0, or Alibaba Cloud Model Studio (`qwen3-tts-flash`, 48 voices including Beijing, Shanghai, Sichuan and Cantonese; `qwen-audio-3.0-tts-flash` for longer text per read). Both cloud engines stream, so speech starts roughly 0.4–0.6 s after the hotkey. Voice, rate and volume are stored per engine |
 | **Yields to dictation** | Starting dictation stops reading — otherwise the microphone would record the speech and transcribe it back |
 
 ### How this differs from the built-in "Speak selection"

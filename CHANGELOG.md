@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.14.0] - 2026-08-13
+
+### Changed
+- **The local reading voice is now the Spoken Content voice, which on current macOS is usually a Siri one** *(macOS)* — `AVSpeechSynthesizer`'s catalogue is compact-only: Siri Neural voices are missing from `speechVoices()` and refused by `voiceWithIdentifier`, so the built-in engine could never reach the voice the system itself reads with. Leaving the voice unset now speaks through `/usr/bin/say` with no `-v`, which uses whatever System Settings → Accessibility → Spoken Content is set to — the same voice you get from the terminal. Picking a listed voice still goes through `AVSpeechSynthesizer` as before. **This changes what you hear if you were on the default voice.** `say` has no volume or pitch flag, so those two rows are hidden while the default is selected and the system's own settings apply; rate still works.
+
+### Fixed
+- **Starting dictation while VoiceX was reading cost you the recording HUD** — the reading overlay's linger-hide was scheduled after dictation had already claimed the window and cancelled the pending hide, so the recording HUD disappeared a few hundred milliseconds after it appeared (2.6 s on a failed read), and the next dictation tap stopped a session the user thought had never started. The reading driver now learns that dictation took the window and skips the hide. The same press was also delayed by up to two seconds: the system voice's stop waited on the main thread, and dictation's key event sits behind that stop on the same worker — it no longer waits.
+
 ## [0.13.0] - 2026-08-13
 
 ### Added
