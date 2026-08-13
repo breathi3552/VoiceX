@@ -542,10 +542,17 @@ run_case() {
     local stop_offset
     stop_offset="$(log_size)"
     trigger_read_hotkey
+    # `speak_stopped` only means the controller accepted the request — `stop`
+    # queues the engine call and returns. `speak_cancelled` is the engine
+    # confirming the audio ended, so both have to land.
     if ! wait_for_event "$stop_offset" 'event=speak_stopped reason=hotkey' "$STOP_TIMEOUT_S"; then
-      fail "$process: the second press did not stop speech"
+      fail "$process: the second press never reached the controller"
       result=fail
       detail="${detail:+$detail; }stop-failed"
+    elif ! wait_for_event "$stop_offset" 'event=speak_cancelled' "$STOP_TIMEOUT_S"; then
+      fail "$process: the stop was accepted but the engine never went silent"
+      result=fail
+      detail="${detail:+$detail; }silence-failed"
     fi
   else
     fail "$process: speech never started"

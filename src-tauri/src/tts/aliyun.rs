@@ -419,8 +419,11 @@ fn run_playback(
                         log_event("speak_finished", &[]);
                     }
                 }
-                // Cancelled: whoever cancelled owns the session now.
-                Ok(false) => {}
+                // Cancelled: whoever cancelled owns the session now, but they
+                // cannot report this part. `speak_stopped` fires when the stop
+                // is accepted; only here is the audio actually finished, which
+                // is what the smoke scripts need to assert on.
+                Ok(false) => log_event("speak_cancelled", &[]),
                 Err(err) => {
                     if token.finish() {
                         log_event(

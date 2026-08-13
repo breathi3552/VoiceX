@@ -127,12 +127,23 @@ define_class!(
 
         #[unsafe(method(speechSynthesizer:didCancelSpeechUtterance:))]
         fn did_cancel(&self, _synthesizer: &AVSpeechSynthesizer, utterance: &AVSpeechUtterance) {
-            // Whoever cancelled owns the session and has already logged why;
-            // reporting again here would double-count every stop.
+            // This used to stay silent, on the grounds that whoever cancelled
+            // had already logged why. That reasoning stopped holding when
+            // `stop` became non-blocking: `speak_stopped` now marks the request
+            // being queued, not the engine going quiet, so without this line
+            // nothing at all reports that the audio actually ended — and the
+            // smoke scripts have no way to tell a stop that worked from one
+            // that was merely accepted. It is not a duplicate of
+            // `speak_stopped`; it is the other half of it.
+            //
+            // Supersession does not reach here: `start` cancels the previous
+            // utterance before registering the new one, so the stale callback
+            // fails the identity check above and returns (see `Speaking`).
             let Some(speaking) = self.take_matching(utterance) else {
                 return;
             };
             speaking.state.speaking.store(false, Ordering::SeqCst);
+            log_event("speak_cancelled", &[]);
         }
     }
 );
@@ -399,11 +410,19 @@ impl TtsBackend for MacSystemBackend {
     fn stop(&self) -> Result<(), TtsError> {
         self.state.speaking.store(false, Ordering::SeqCst);
 
-        on_main(&self.app, || {
-            with_synthesizer(|synthesizer, _| unsafe {
-                synthesizer.stopSpeakingAtBoundary(AVSpeechBoundary::Immediate);
-            });
-        })
+        // Queue the engine stop and return. Waiting for the main thread here
+        // (as `start` must) would stall the hotkey worker for up to
+        // `MAIN_THREAD_TIMEOUT_MS`, and dictation's `Pressed` sits behind this
+        // call on that same worker. The closure still runs; we just do not
+        // wait for it. `run_on_main_thread` cannot be un-queued, which is
+        // fine: stopping a synthesizer that has already gone idle is a no-op.
+        self.app
+            .run_on_main_thread(|| {
+                with_synthesizer(|synthesizer, _| unsafe {
+                    synthesizer.stopSpeakingAtBoundary(AVSpeechBoundary::Immediate);
+                });
+            })
+            .map_err(|err| TtsError::Backend(format!("run_on_main_thread failed: {err}")))
     }
 
     fn status(&self) -> TtsStatus {

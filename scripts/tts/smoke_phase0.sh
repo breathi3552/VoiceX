@@ -268,10 +268,18 @@ run_case() {
   info "$label: injecting the read hotkey again to stop"
   trigger_read_hotkey
 
-  if wait_for_event "$stop_offset" 'event=speak_stopped reason=hotkey' "$STOP_TIMEOUT_S"; then
+  # Two events, because they answer different questions. `speak_stopped` says
+  # the controller accepted a stop for the right reason; since `stop` became
+  # non-blocking it fires when the request is queued, so on its own it cannot
+  # tell a stop that worked from one that was merely accepted.
+  # `speak_cancelled` is the engine reporting that the audio actually ended.
+  if ! wait_for_event "$stop_offset" 'event=speak_stopped reason=hotkey' "$STOP_TIMEOUT_S"; then
+    fail "$label: the second press never reached the controller"
+    log_since "$stop_offset" | grep -E 'event=' | sed 's/^/     /' || true
+  elif wait_for_event "$stop_offset" 'event=speak_cancelled' "$STOP_TIMEOUT_S"; then
     pass "$label: speech stopped on the second press"
   else
-    fail "$label: second press did not stop speech"
+    fail "$label: the stop was accepted but the engine never went silent"
     log_since "$stop_offset" | grep -E 'event=' | sed 's/^/     /' || true
   fi
 

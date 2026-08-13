@@ -71,6 +71,10 @@ struct ControllerInner {
     /// drive one HUD window and cannot fight over its hide timer. Reading and
     /// dictation are mutually exclusive, so they never want it at once.
     hud: Mutex<Option<HudService>>,
+    /// Set just before dictation stops a read. The HUD driver must not hide
+    /// afterwards — dictation is about to use the same window, and a linger
+    /// hide would take it down a few hundred milliseconds into recording.
+    hud_yielded: Arc<AtomicBool>,
 }
 
 #[derive(Clone, Default)]
@@ -145,6 +149,10 @@ impl TtsController {
     ) {
         let Some(hud) = self.hud() else { return };
         let session = self.inner.session.clone();
+        let yielded = self.inner.hud_yielded.clone();
+        // A leftover yield from a previous handoff must not suppress hide on
+        // this read — that flag is only meaningful for the session that set it.
+        yielded.store(false, Ordering::SeqCst);
 
         hud.cancel_hide();
         // Compact presentation: a read has nothing to display but its own
@@ -180,6 +188,13 @@ impl TtsController {
                 }
 
                 hud.emit_reading(None, false);
+                // Dictation already owns the window. Hiding here would take the
+                // recording HUD down a moment after it appeared, and the next
+                // dictation tap would stop a session the user thought never
+                // started.
+                if yielded.swap(false, Ordering::SeqCst) {
+                    return;
+                }
                 let reported = failure.lock().ok().and_then(|slot| slot.clone());
                 let hud_for_hide = hud.clone();
                 match reported {
@@ -398,6 +413,20 @@ impl TtsController {
     /// is called from the hotkey hook's worker.
     pub fn handle_read_selection_hotkey(&self) {
         let active = self.is_active();
+        // Dictation keeps the microphone. A new read would be inaudible and
+        // would get transcribed, so the key is swallowed. An already-running
+        // read is the stuck case takeover missed — stopping it is still right.
+        if self.is_recording() && !active {
+            log_event(
+                "hotkey_action",
+                &[
+                    ("action", "read_selection".to_string()),
+                    ("state", "recording".to_string()),
+                ],
+            );
+            return;
+        }
+
         log_event(
             "hotkey_action",
             &[
@@ -414,7 +443,13 @@ impl TtsController {
     }
 
     /// Stop reading because dictation is taking over. No-op when idle, so the
-    /// dictation hotkey stays cheap.
+    /// dictation hotkey stays cheap. The HUD handoff is `stop`'s job, next to
+    /// the session release it has to precede.
+    ///
+    /// Must return without waiting for the engine to go silent: this runs on
+    /// the same worker that then starts dictation, and a blocking stop delays
+    /// `HotkeyPressed` by however long the backend needs — up to two seconds
+    /// for the system voice's main-thread hop.
     pub fn stop_for_dictation(&self) {
         if self.is_active() {
             self.stop(StopReason::Dictation);
@@ -422,6 +457,17 @@ impl TtsController {
     }
 
     pub fn stop(&self, reason: StopReason) {
+        // Dictation is about to show the same HUD window, so the reading driver
+        // must not hide it on the way out. This has to happen before the
+        // release below — the driver leaves its loop the moment the slot goes
+        // idle — which is why it lives here rather than in the caller: the two
+        // lines sit together and cannot be reordered from outside. Only
+        // dictation reuses the window; every other reason still wants the
+        // driver's linger-and-hide.
+        if reason == StopReason::Dictation {
+            self.inner.hud_yielded.store(true, Ordering::SeqCst);
+        }
+
         // Release the session first: this cancels every outstanding token, so
         // an in-flight read discards its result and a queued main-thread speak
         // aborts instead of starting after the user asked to stop.
@@ -433,12 +479,13 @@ impl TtsController {
             return;
         };
         match backend.stop() {
-            // Distinct from `speak_stop`, which only records the request. How
-            // much more it means depends on the backend: the system voice hops
-            // to the main thread and returns once the engine has stopped, while
-            // a cloud backend only sets the flag its audio callback reads, so
-            // silence follows on the next callback rather than before this
-            // returns.
+            // Backends must not block here: this is called from the hotkey
+            // worker, which still has dictation's `Pressed` to deliver. So
+            // this marks the stop being *accepted*, one step past `speak_stop`
+            // recording that it was asked for, and short of the audio actually
+            // ending — the backends report that separately as `speak_cancelled`
+            // once the engine confirms it. Anything asserting that speech
+            // stopped wants that event, not this one.
             Ok(()) => log_event("speak_stopped", &[("reason", reason.as_str().to_string())]),
             Err(err) => log_event(
                 "speak_err",
@@ -672,8 +719,11 @@ fn log_selection_error(err: &SelectionError) {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
     use super::super::SessionSlot;
-    use super::voice_request;
+    use super::{voice_request, StopReason, TtsController};
     use crate::commands::settings::AppSettings;
 
     #[test]
@@ -820,5 +870,82 @@ mod tests {
         );
         token.finish();
         assert!(!slot.is_active(), "hotkey after completion must start anew");
+    }
+
+    #[test]
+    fn the_reading_hotkey_is_ignored_while_dictation_is_recording() {
+        // Starting a read into a live microphone would be inaudible and would
+        // get transcribed. The key is swallowed; nothing else happens.
+        let controller = TtsController::default();
+        controller.attach_recording_flag(Arc::new(AtomicBool::new(true)));
+        assert!(!controller.is_active());
+
+        controller.handle_read_selection_hotkey();
+
+        assert!(!controller.is_active(), "recording must not start a read");
+        assert!(
+            !controller.inner.hud_yielded.load(Ordering::SeqCst),
+            "a no-op must not mark the HUD as handed off"
+        );
+    }
+
+    #[test]
+    fn stopping_for_dictation_marks_the_hud_as_handed_off() {
+        // The HUD driver exits as soon as the session goes idle, so the flag
+        // has to be set before the release. That ordering is not observable
+        // from out here; what this pins is that the flag is `stop`'s own doing,
+        // which is what keeps the two lines adjacent and unreorderable.
+        let controller = TtsController::default();
+        controller.inner.session.claim();
+
+        controller.stop(StopReason::Dictation);
+
+        assert!(!controller.is_active());
+        assert!(
+            controller.inner.hud_yielded.load(Ordering::SeqCst),
+            "the HUD driver must see the handoff when it leaves its loop"
+        );
+    }
+
+    #[test]
+    fn stopping_for_any_other_reason_leaves_the_hud_to_hide_itself() {
+        // Only dictation reuses the window. Suppressing the hide for a hotkey
+        // or Escape stop would strand the reading HUD on screen with nothing
+        // behind it.
+        for reason in [
+            StopReason::Hotkey,
+            StopReason::Escape,
+            StopReason::Ui,
+            StopReason::Superseded,
+        ] {
+            let controller = TtsController::default();
+            controller.inner.session.claim();
+
+            controller.stop(reason);
+
+            assert!(
+                !controller.inner.hud_yielded.load(Ordering::SeqCst),
+                "{reason:?} must leave the hide to the HUD driver"
+            );
+        }
+    }
+
+    #[test]
+    fn dictation_takeover_hands_the_hud_over() {
+        let controller = TtsController::default();
+        controller.inner.session.claim();
+
+        controller.stop_for_dictation();
+
+        assert!(!controller.is_active());
+        assert!(controller.inner.hud_yielded.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn dictation_takeover_is_a_no_op_when_nothing_is_being_read() {
+        let controller = TtsController::default();
+        controller.stop_for_dictation();
+        assert!(!controller.inner.hud_yielded.load(Ordering::SeqCst));
+        assert!(!controller.is_active());
     }
 }
