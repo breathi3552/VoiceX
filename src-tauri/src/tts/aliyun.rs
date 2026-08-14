@@ -61,7 +61,11 @@ struct ModelSpec {
     /// Longest text accepted in one request.
     max_chars: usize,
     voices: &'static [(&'static str, &'static str, &'static str)],
-    build_body: fn(&Synthesis) -> Value,
+    /// Always called with this spec's own `id`, so the body cannot name a
+    /// different model than the spec it belongs to — a copy-pasted entry that
+    /// forgot to re-thread the constant used to compile fine and send requests
+    /// for the wrong model.
+    build_body: fn(model: &'static str, s: &Synthesis) -> Value,
 }
 
 /// The synthesis parameters, already on the provider's own scales.
@@ -107,12 +111,18 @@ const QWEN_AUDIO_VOICES: [(&str, &str, &str); 8] = [
 /// CosyVoice-v3-flash system voices. The service has eighty-plus; this is the
 /// reading-shaped subset that the live account accepted. The picker still
 /// accepts a typed id, so the rest stay reachable.
+///
+/// Language tags follow the voice list's primary language and the convention
+/// the Qwen3 table set: dialect voices (Cantonese included) are `zh-CN`, so
+/// filtering the picker by language behaves the same under every model. Per
+/// the published list, `loongbella_v3` is a Mandarin+English voice despite the
+/// `loong` prefix that marks the English-only ones.
 const COSYVOICE_VOICES: [(&str, &str, &str); 10] = [
     ("longanyang", "龙安洋", "zh-CN"),
     ("longanhuan", "龙安欢", "zh-CN"),
     ("longanhuan_v3", "龙安欢（方言）", "zh-CN"),
     ("longhuhu_v3", "龙呼呼", "zh-CN"),
-    ("longjiaxin_v3", "龙嘉欣", "zh-HK"),
+    ("longjiaxin_v3", "龙嘉欣（粤语）", "zh-CN"),
     ("longlaotie_v3", "龙老铁", "zh-CN"),
     ("longsanshu_v3", "龙三叔", "zh-CN"),
     ("longshuo_v3", "龙硕", "zh-CN"),
@@ -143,9 +153,9 @@ const SPECS: [ModelSpec; 3] = [
         // 500 characters, 1.9 s at 5000 — so this is the limit, not a target.
         max_chars: 5_000,
         voices: &QWEN3_VOICES,
-        build_body: |s| {
+        build_body: |model, s| {
             json!({
-                "model": MODEL_QWEN3,
+                "model": model,
                 "input": {
                     "text": s.text,
                     "voice": s.voice,
@@ -165,24 +175,26 @@ const SPECS: [ModelSpec; 3] = [
         id: MODEL_QWEN_AUDIO,
         path: "/api/v1/services/audio/tts/SpeechSynthesizer",
         sample_rates: &[48_000, 44_100, 24_000, 22_050, 16_000],
-        // The service rejects at 20000, but counts something other than
-        // characters getting there — a 20000-character body was reported back
-        // as 36000. Left well short of the edge rather than guessing the rule.
-        max_chars: 15_000,
+        // The service caps a request at 20000 of its own units and counts a
+        // CJK character as two of them: 20000 characters were reported back
+        // as 36000 and 15000 as 27000, both rejected; 10000 were accepted.
+        // 9000 keeps a pure-CJK selection at 18000 units, short of the edge.
+        max_chars: 9_000,
         voices: &QWEN_AUDIO_VOICES,
-        build_body: |s| speech_synthesizer_body(MODEL_QWEN_AUDIO, s),
+        build_body: speech_synthesizer_body,
     },
     ModelSpec {
         id: MODEL_COSYVOICE,
         path: "/api/v1/services/audio/tts/SpeechSynthesizer",
+        // Measured: every rate on this list comes back honoured in the MP3
+        // frame header, so the device-preferred rate the playback module
+        // negotiates is safe to request.
         sample_rates: &[48_000, 44_100, 24_000, 22_050, 16_000],
-        // Same SpeechSynthesizer path as qwen-audio. 5000 characters were
-        // accepted with a first packet around 530 ms; the documented 20000
-        // ceiling counts something other than characters, so this stays short
-        // of the edge for the same reason the qwen-audio spec does.
-        max_chars: 15_000,
+        // Same 20000-unit cap as qwen-audio, with the same CJK-counts-double
+        // rule: 15000 characters were rejected as 27000 units, 10000 accepted.
+        max_chars: 9_000,
         voices: &COSYVOICE_VOICES,
-        build_body: |s| speech_synthesizer_body(MODEL_COSYVOICE, s),
+        build_body: speech_synthesizer_body,
     },
 ];
 
@@ -502,7 +514,7 @@ async fn stream_audio(
         // Without this the service synthesizes the whole text before replying,
         // which for a long selection takes minutes rather than seconds.
         .header("X-DashScope-SSE", "enable")
-        .json(&(spec.build_body)(synthesis))
+        .json(&(spec.build_body)(spec.id, synthesis))
         .send()
         .await
         .map_err(|err| format!("request failed: {err}"))?;
@@ -640,19 +652,19 @@ mod tests {
             rate: 1.5,
         };
 
-        let qwen3 = (spec_for(MODEL_QWEN3).build_body)(&synthesis);
+        let qwen3 = (spec_for(MODEL_QWEN3).build_body)(MODEL_QWEN3, &synthesis);
         assert_eq!(qwen3["parameters"]["speech_rate"], 1.5);
         assert_eq!(qwen3["parameters"]["response_format"], "mp3");
         assert_eq!(qwen3["input"]["language_type"], "Auto");
         assert!(qwen3["input"].get("format").is_none());
 
-        let audio = (spec_for(MODEL_QWEN_AUDIO).build_body)(&synthesis);
+        let audio = (spec_for(MODEL_QWEN_AUDIO).build_body)(MODEL_QWEN_AUDIO, &synthesis);
         assert_eq!(audio["input"]["rate"], 1.5);
         assert_eq!(audio["input"]["format"], "mp3");
         assert!(audio["input"].get("language_type").is_none());
         assert!(audio.get("parameters").is_none());
 
-        let cosy = (spec_for(MODEL_COSYVOICE).build_body)(&synthesis);
+        let cosy = (spec_for(MODEL_COSYVOICE).build_body)(MODEL_COSYVOICE, &synthesis);
         assert_eq!(cosy["model"], MODEL_COSYVOICE);
         assert_eq!(cosy["input"]["rate"], 1.5);
         assert_eq!(cosy["input"]["format"], "mp3");
@@ -660,6 +672,22 @@ mod tests {
             spec_for(MODEL_COSYVOICE).path,
             spec_for(MODEL_QWEN_AUDIO).path
         );
+    }
+
+    #[test]
+    fn every_spec_names_its_own_model_in_the_body() {
+        // The id decides which spec is looked up; the body decides which model
+        // the service runs. `stream_audio` threads `spec.id` into `build_body`,
+        // and this pins that a body cannot disagree with its spec.
+        let synthesis = Synthesis {
+            text: "hi",
+            voice: "Cherry",
+            sample_rate: 24_000,
+            rate: 1.0,
+        };
+        for spec in &SPECS {
+            assert_eq!((spec.build_body)(spec.id, &synthesis)["model"], spec.id);
+        }
     }
 
     #[test]
@@ -775,7 +803,7 @@ mod tests {
 
         // The text limit rides along, so a long selection is trimmed to what
         // the model in force actually accepts.
-        assert_eq!(backend.max_chars(), Some(15_000));
+        assert_eq!(backend.max_chars(), Some(9_000));
     }
 
     #[test]

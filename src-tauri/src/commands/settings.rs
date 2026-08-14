@@ -220,9 +220,8 @@ pub struct AppSettings {
     /// `aliyunTtsVoiceCosyVoice`. `cosyvoice` as one word serializes as
     /// `Cosyvoice` and the picker writes a field the backend never reads —
     /// every request then falls back to the default speaker.
-    #[serde(default = "default_aliyun_tts_voice_cosy_voice")]
     pub aliyun_tts_voice_cosy_voice: String,
-    /// Normalized like the system voice's. Both families take the same
+    /// Normalized like the system voice's. Every family takes the same
     /// 0.5..=2.0 multiplier, so one pair covers them.
     pub aliyun_tts_rate: f32,
     pub aliyun_tts_volume: f32,
@@ -316,10 +315,6 @@ pub struct LlmProviderProbeResult {
     pub response_text: String,
     pub expected_match: bool,
     pub error_message: Option<String>,
-}
-
-fn default_aliyun_tts_voice_cosy_voice() -> String {
-    crate::tts::aliyun::default_voice_for(crate::tts::aliyun::MODEL_COSYVOICE).to_string()
 }
 
 impl Default for AppSettings {

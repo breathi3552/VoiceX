@@ -19,7 +19,8 @@ account the app uses:
     ./scripts/tts/aliyun_probe.py cosyvoice   # CosyVoice-v3 availability on the same account
 
 Every call is billed per input character, so the texts here are deliberately
-short. `length` is the exception and costs a few thousand characters.
+short. The exceptions are `length` and the length section of `cosyvoice`,
+which cost a few thousand characters each.
 """
 
 import base64
@@ -60,15 +61,22 @@ def credentials():
     if not row:
         sys.exit("no app_settings row in user_config")
     settings = json.loads(row[0])
-    key = (
-        settings.get("aliyunTtsApiKey") or settings.get("qwenAsrApiKey") or ""
-    ).strip()
+    tts_key = (settings.get("aliyunTtsApiKey") or "").strip()
+    asr_key = (settings.get("qwenAsrApiKey") or "").strip()
+    key = tts_key or asr_key
     if not key:
         sys.exit(
             "no DashScope API key configured "
             "(settings keys: aliyunTtsApiKey, qwenAsrApiKey)"
         )
-    return key, (settings.get("qwenAsrWorkspaceId") or "").strip()
+    # The workspace id belongs to the ASR account. If the TTS key is a
+    # different account's, pairing them would send one account's token to the
+    # other's workspace host and the 403 would read as "the workspace host
+    # stopped serving this model" — so the workspace probes are skipped instead.
+    workspace = (settings.get("qwenAsrWorkspaceId") or "").strip()
+    if key != asr_key:
+        workspace = ""
+    return key, workspace
 
 
 KEY, WORKSPACE = credentials()
@@ -89,6 +97,89 @@ def describe_error(exc):
         return f"HTTP {exc.code} {body.get('code')}: {str(body.get('message'))[:70]}"
     except Exception:
         return f"HTTP {exc.code}"
+
+
+def sse_frames(response):
+    """The `data:` JSON payloads of a streaming response, in order."""
+    for raw in response:
+        line = raw.decode("utf-8", "replace").strip()
+        if line.startswith("data:"):
+            yield json.loads(line[5:])
+
+
+def accepted(model, url, voice, count, input_extra=None):
+    """Whether one request of `count` characters starts producing audio.
+
+    Judged on the first audio chunk rather than on completion: a long
+    non-streaming request takes many minutes to synthesize, which is itself
+    the reason the app has to stream. The text is billed in full either way.
+    """
+    body = {"model": model,
+            "input": {"text": "测试文本。" * (count // 5), "voice": voice},
+            "parameters": {"response_format": "mp3", "format": "mp3"}}
+    if input_extra:
+        body["input"].update(input_extra)
+    started = time.time()
+    try:
+        with post(url, body, stream=True, timeout=90) as response:
+            for payload in sse_frames(response):
+                if payload.get("code"):
+                    print(f"{model:26s} {count:6d} chars  rejected  "
+                          f"{payload.get('code')}: {str(payload.get('message'))[:70]}")
+                    return False
+                if ((payload.get("output") or {}).get("audio") or {}).get("data"):
+                    print(f"{model:26s} {count:6d} chars  accepted  "
+                          f"first packet {(time.time() - started) * 1000:.0f} ms")
+                    return True
+    except urllib.error.HTTPError as exc:
+        print(f"{model:26s} {count:6d} chars  rejected  {describe_error(exc)}")
+        return False
+    print(f"{model:26s} {count:6d} chars  no audio returned")
+    return False
+
+
+def mp3_sample_rate(blob):
+    """Sample rate declared by the first MP3 frame header, or None."""
+    tables = {
+        3: (44100, 48000, 32000),  # MPEG1
+        2: (22050, 24000, 16000),  # MPEG2
+        0: (11025, 12000, 8000),   # MPEG2.5
+    }
+    for i in range(len(blob) - 3):
+        if blob[i] != 0xFF or (blob[i + 1] & 0xE0) != 0xE0:
+            continue
+        rates = tables.get((blob[i + 1] >> 3) & 0x3)
+        index = (blob[i + 2] >> 2) & 0x3
+        if rates is None or index == 3:
+            continue
+        return rates[index]
+    return None
+
+
+def check_rate(model, url, voice, rate):
+    """Whether a requested sample_rate is honoured, judged by the rate the
+    returned MP3 actually declares — a clamped rate comes back as a 200 with
+    audio at some other rate, which downstream surfaces as a decode mismatch,
+    not as an error."""
+    body = {"model": model,
+            "input": {"text": "测试。", "voice": voice,
+                      "format": "mp3", "sample_rate": rate}}
+    try:
+        with post(url, body, stream=True, timeout=60) as response:
+            for payload in sse_frames(response):
+                if payload.get("code"):
+                    print(f"{model:26s} sample_rate={rate:5d}  rejected  "
+                          f"{payload.get('code')}: {str(payload.get('message'))[:60]}")
+                    return
+                data = ((payload.get("output") or {}).get("audio") or {}).get("data")
+                if data:
+                    actual = mp3_sample_rate(base64.b64decode(data))
+                    verdict = "honoured" if actual == rate else f"mp3 says {actual}"
+                    print(f"{model:26s} sample_rate={rate:5d}  {verdict}")
+                    return
+        print(f"{model:26s} sample_rate={rate:5d}  no audio returned")
+    except urllib.error.HTTPError as exc:
+        print(f"{model:26s} sample_rate={rate:5d}  {describe_error(exc)}")
 
 
 def synthesize(label, model, url, voice, params=None, extra_input=None, text=TEXT):
@@ -159,11 +250,7 @@ def probe_sse():
         head = None
         last = None
         with post(url, body, stream=True) as response:
-            for raw in response:
-                line = raw.decode("utf-8", "replace").strip()
-                if not line.startswith("data:"):
-                    continue
-                payload = json.loads(line[5:])
+            for payload in sse_frames(response):
                 last = payload
                 data = ((payload.get("output") or {}).get("audio") or {}).get("data")
                 if data:
@@ -237,34 +324,7 @@ def probe_cross():
 
 
 def probe_length():
-    """Accepted single-request text length.
-
-    Judged on the first audio chunk rather than on completion: a 5000-character
-    non-streaming request takes many minutes to synthesize, which is itself the
-    reason the app has to stream.
-    """
-    def accepted(model, url, voice, count):
-        body = {"model": model,
-                "input": {"text": "测试文本。" * (count // 5), "voice": voice},
-                "parameters": {"response_format": "mp3", "format": "mp3"}}
-        started = time.time()
-        try:
-            with post(url, body, stream=True, timeout=90) as response:
-                for raw in response:
-                    line = raw.decode("utf-8", "replace").strip()
-                    if not line.startswith("data:"):
-                        continue
-                    payload = json.loads(line[5:])
-                    if ((payload.get("output") or {}).get("audio") or {}).get("data"):
-                        print(f"{model:26s} {count:6d} chars  accepted  "
-                              f"first packet {(time.time() - started) * 1000:.0f} ms")
-                        return True
-        except urllib.error.HTTPError as exc:
-            print(f"{model:26s} {count:6d} chars  rejected  {describe_error(exc)}")
-            return False
-        print(f"{model:26s} {count:6d} chars  no audio returned")
-        return False
-
+    """Accepted single-request text length."""
     print("=== accepted single-request length ===")
     for count in (500, 1200, 2000, 5000):
         if not accepted(QWEN3, MULTIMODAL, QWEN3_VOICE, count):
@@ -389,6 +449,15 @@ def probe_cosyvoice():
             if not stream:
                 with post(url, body, timeout=timeout) as response:
                     output = json.loads(response.read())
+                # Rejections can arrive as a 200 with an error envelope, the
+                # same shape they take mid-stream — OK has to mean "no error",
+                # not "no HTTPError", or a rejected voice reads as accepted.
+                if output.get("code"):
+                    print(
+                        f"{label:58s} ERR  {output.get('code')}: "
+                        f"{str(output.get('message'))[:90]}"
+                    )
+                    return None
                 audio = (output.get("output") or {}).get("audio") or {}
                 usage = output.get("usage")
                 print(
@@ -401,11 +470,7 @@ def probe_cosyvoice():
             head = None
             last = None
             with post(url, body, stream=True, timeout=timeout) as response:
-                for raw in response:
-                    line = raw.decode("utf-8", "replace").strip()
-                    if not line.startswith("data:"):
-                        continue
-                    payload = json.loads(line[5:])
+                for payload in sse_frames(response):
                     last = payload
                     if payload.get("code"):
                         print(
@@ -421,9 +486,12 @@ def probe_cosyvoice():
                         if first is None:
                             first = time.time() - started
                             head = blob[:4]
+            # A stream can end with framing frames only — no audio, no error.
+            # That is a finding ("the model produced silence"), not a crash.
+            first_ms = f"{first * 1000:.0f}ms" if first is not None else "-"
             usage = (last or {}).get("usage")
             print(
-                f"{label:58s} SSE  first={first * 1000:.0f}ms  "
+                f"{label:58s} SSE  first={first_ms}  "
                 f"chunks={chunks}  bytes={total}  "
                 f"magic={head.hex() if head else '-'}  usage={usage}"
             )
@@ -579,37 +647,18 @@ def probe_cosyvoice():
         ),
     )
 
+    print("\n=== sample_rate actually honoured (mp3 header of first chunk) ===")
+    for rate in (48000, 44100, 24000, 22050, 16000):
+        check_rate(COSY_FLASH, SPEECH_SYNTH, COSY_VOICE, rate)
+
     print("\n=== accepted length (first audio chunk, then disconnect) ===")
-    for count in (500, 2000, 5000):
-        text = "测试文本。" * (count // 5)
-        started = time.time()
-        try:
-            with post(
-                SPEECH_SYNTH,
-                body(COSY_FLASH, COSY_VOICE, text=text),
-                stream=True,
-                timeout=90,
-            ) as response:
-                for raw in response:
-                    line = raw.decode("utf-8", "replace").strip()
-                    if not line.startswith("data:"):
-                        continue
-                    payload = json.loads(line[5:])
-                    if payload.get("code"):
-                        print(
-                            f"{COSY_FLASH:26s} {count:6d} chars  rejected  "
-                            f"{payload.get('code')}: {str(payload.get('message'))[:70]}"
-                        )
-                        return
-                    if ((payload.get("output") or {}).get("audio") or {}).get("data"):
-                        print(
-                            f"{COSY_FLASH:26s} {count:6d} chars  accepted  "
-                            f"first packet {(time.time() - started) * 1000:.0f} ms"
-                        )
-                        break
-        except urllib.error.HTTPError as exc:
-            print(f"{COSY_FLASH:26s} {count:6d} chars  rejected  {describe_error(exc)}")
-            return
+    # The service caps a request at 20000 units, counting a CJK character as
+    # two — so 10000 (18000 units) passes and 15000 (27000 units) is refused.
+    # These runs bill every accepted character; most of this probe's cost.
+    for count in (500, 2000, 5000, 10000, 15000):
+        if not accepted(COSY_FLASH, SPEECH_SYNTH, COSY_VOICE, count,
+                        input_extra={"format": "mp3", "sample_rate": 24000}):
+            break
 
 
 PROBES = {
