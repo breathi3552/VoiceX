@@ -56,7 +56,7 @@ const ttsEnabled = computed({
 })
 
 type ProviderValue = 'system' | 'volcengine' | 'aliyun' | 'mimo'
-type AliyunModel = 'qwen3-tts-flash' | 'qwen-audio-3.0-tts-flash'
+type AliyunModel = 'qwen3-tts-flash' | 'qwen-audio-3.0-tts-flash' | 'cosyvoice-v3-flash'
 
 const providerOptions = computed(() => [
   { label: t('reading.providerSystem'), value: 'system' },
@@ -89,26 +89,32 @@ const isSystemDefaultVoice = computed(
 
 const aliyunModelOptions = computed(() => [
   { label: t('reading.aliyunModelQwen3'), value: 'qwen3-tts-flash' },
-  { label: t('reading.aliyunModelQwenAudio'), value: 'qwen-audio-3.0-tts-flash' }
+  { label: t('reading.aliyunModelQwenAudio'), value: 'qwen-audio-3.0-tts-flash' },
+  { label: t('reading.aliyunModelCosyVoice'), value: 'cosyvoice-v3-flash' }
 ])
 
 const aliyunTtsModel = computed({
   get: () => settingsStore.settings.aliyunTtsModel,
   set: (value: AliyunModel) => {
     settingsStore.updateSetting('aliyunTtsModel', value)
-    // The two models have entirely separate voice tables.
+    // The models have entirely separate voice tables.
     void loadVoices('aliyun', value)
   }
 })
 
-// Which voice setting the picker is editing. The two Alibaba Cloud models
+// Which voice setting the picker is editing. The Alibaba Cloud models
 // reject each other's ids, so they cannot share one key: switching model would
 // otherwise leave a voice that fails on the next read.
-const aliyunVoiceKey = computed(() =>
-  settingsStore.settings.aliyunTtsModel === 'qwen-audio-3.0-tts-flash'
-    ? ('aliyunTtsVoiceQwenAudio' as const)
-    : ('aliyunTtsVoiceQwen3' as const)
-)
+const aliyunVoiceKey = computed(() => {
+  switch (settingsStore.settings.aliyunTtsModel) {
+    case 'qwen-audio-3.0-tts-flash':
+      return 'aliyunTtsVoiceQwenAudio' as const
+    case 'cosyvoice-v3-flash':
+      return 'aliyunTtsVoiceCosyVoice' as const
+    default:
+      return 'aliyunTtsVoiceQwen3' as const
+  }
+})
 
 const voiceOptions = computed(() => {
   const listed = voices.value.map((voice) => ({

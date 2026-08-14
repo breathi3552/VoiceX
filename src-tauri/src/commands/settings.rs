@@ -208,14 +208,20 @@ pub struct AppSettings {
     /// separately all the same: sharing one field would mean turning on reading
     /// silently re-points at whatever key dictation happens to be using.
     pub aliyun_tts_api_key: String,
-    /// Which model family speaks. The two are separate services with separate
-    /// endpoints and parameter spellings, which the backend maps.
+    /// Which model family speaks. They are separate services with separate
+    /// endpoints, parameter spellings, and voice tables, which the backend maps.
     pub aliyun_tts_model: String,
-    /// One voice per family, because the ids are not interchangeable — either
-    /// family rejects the other's outright, so a shared key would make every
+    /// One voice per family, because the ids are not interchangeable — each
+    /// family rejects the others' outright, so a shared key would make every
     /// model switch fail until the voice was reset by hand.
     pub aliyun_tts_voice_qwen3: String,
     pub aliyun_tts_voice_qwen_audio: String,
+    /// Underscore before `voice` so serde camelCase matches the frontend key
+    /// `aliyunTtsVoiceCosyVoice`. `cosyvoice` as one word serializes as
+    /// `Cosyvoice` and the picker writes a field the backend never reads —
+    /// every request then falls back to the default speaker.
+    #[serde(default = "default_aliyun_tts_voice_cosy_voice")]
+    pub aliyun_tts_voice_cosy_voice: String,
     /// Normalized like the system voice's. Both families take the same
     /// 0.5..=2.0 multiplier, so one pair covers them.
     pub aliyun_tts_rate: f32,
@@ -310,6 +316,10 @@ pub struct LlmProviderProbeResult {
     pub response_text: String,
     pub expected_match: bool,
     pub error_message: Option<String>,
+}
+
+fn default_aliyun_tts_voice_cosy_voice() -> String {
+    crate::tts::aliyun::default_voice_for(crate::tts::aliyun::MODEL_COSYVOICE).to_string()
 }
 
 impl Default for AppSettings {
@@ -454,6 +464,10 @@ impl Default for AppSettings {
             .to_string(),
             aliyun_tts_voice_qwen_audio: crate::tts::aliyun::default_voice_for(
                 crate::tts::aliyun::MODEL_QWEN_AUDIO,
+            )
+            .to_string(),
+            aliyun_tts_voice_cosy_voice: crate::tts::aliyun::default_voice_for(
+                crate::tts::aliyun::MODEL_COSYVOICE,
             )
             .to_string(),
             aliyun_tts_rate: 0.5,
@@ -1095,6 +1109,8 @@ mod tests {
         settings.system_tts_pitch = 1.4;
         settings.volc_tts_speaker = "zh_male_liufei_uranus_bigtts".to_string();
         settings.volc_tts_rate = 0.3;
+        settings.aliyun_tts_model = crate::tts::aliyun::MODEL_COSYVOICE.to_string();
+        settings.aliyun_tts_voice_cosy_voice = "longhuhu_v3".to_string();
 
         let json = serde_json::to_string(&settings).unwrap();
         let blob: serde_json::Value = serde_json::from_str(&json).unwrap();
@@ -1106,6 +1122,12 @@ mod tests {
             "com.apple.voice.compact.zh-CN.Tingting"
         );
         assert_eq!(blob["volcTtsSpeaker"], "zh_male_liufei_uranus_bigtts");
+        assert_eq!(blob["aliyunTtsModel"], "cosyvoice-v3-flash");
+        assert_eq!(blob["aliyunTtsVoiceCosyVoice"], "longhuhu_v3");
+        assert!(
+            blob.get("aliyunTtsVoiceCosyvoice").is_none(),
+            "serde camelCase of `cosyvoice` as one word is Cosyvoice, which the frontend never writes"
+        );
 
         let restored: AppSettings = serde_json::from_str(&json).unwrap();
         assert!(!restored.tts_enabled);
@@ -1116,6 +1138,7 @@ mod tests {
             "each provider keeps its own rate"
         );
         assert_eq!(restored.tts_hotkey_config.as_deref(), Some("83|2304|0"));
+        assert_eq!(restored.aliyun_tts_voice_cosy_voice, "longhuhu_v3");
     }
 
     #[test]

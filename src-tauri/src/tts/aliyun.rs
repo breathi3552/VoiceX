@@ -1,12 +1,14 @@
 //! Alibaba Cloud Model Studio (百炼) speech synthesis backend.
 //!
-//! Covers two model families behind one provider. They are separate services
-//! with separate endpoints — the paths are not interchangeable, and neither are
-//! their voices — but over HTTP with server-sent events they hand back the same
-//! thing in the same shape: base64 MP3 in `output.audio.data`, chunk after
-//! chunk, with a URL in the final frame that we discard. That similarity is
-//! what makes one backend reasonable; [`ModelSpec`] holds everything that is
-//! genuinely per model.
+//! Covers three model families behind one provider. Qwen3-TTS is its own
+//! service. Qwen-Audio-3.0-TTS and CosyVoice-v3 share the SpeechSynthesizer
+//! endpoint and the same request spelling — CosyVoice is the engine behind
+//! both, which is why their error messages say `[cosyvoice:]` — but the voice
+//! ids are not interchangeable. Over HTTP with server-sent events they all
+//! hand back the same thing in the same shape: base64 MP3 in
+//! `output.audio.data`, chunk after chunk, with a URL in the final frame that
+//! we discard. That similarity is what makes one backend reasonable;
+//! [`ModelSpec`] holds everything that is genuinely per model.
 //!
 //! Chosen over the two WebSocket protocols on the same measurement that settled
 //! the Volcengine backend: the text is fully known before the request goes out,
@@ -37,12 +39,13 @@ const HOST: &str = "https://dashscope.aliyuncs.com";
 
 pub const MODEL_QWEN3: &str = "qwen3-tts-flash";
 pub const MODEL_QWEN_AUDIO: &str = "qwen-audio-3.0-tts-flash";
+pub const MODEL_COSYVOICE: &str = "cosyvoice-v3-flash";
 
 pub fn default_model() -> &'static str {
     MODEL_QWEN3
 }
 
-/// Everything that differs between the two model families.
+/// Everything that differs between the model families.
 ///
 /// The parameter names look like gratuitous variation — `speech_rate` against
 /// `rate`, `response_format` against `format` — but they are separate services
@@ -88,7 +91,8 @@ const QWEN3_VOICES: [(&str, &str, &str); 12] = [
 ];
 
 /// Qwen-Audio-3.0-TTS, which shares its engine with CosyVoice — the error
-/// messages say `[cosyvoice:]` outright.
+/// messages say `[cosyvoice:]` outright. Voice ids still do not carry across:
+/// `longanhuan_v3.6` here is not `longanhuan` / `longanhuan_v3` on CosyVoice.
 const QWEN_AUDIO_VOICES: [(&str, &str, &str); 8] = [
     ("longanfengyue", "龙安风悦", "zh-CN"),
     ("longanyuanfei", "龙安元妃", "zh-CN"),
@@ -100,7 +104,36 @@ const QWEN_AUDIO_VOICES: [(&str, &str, &str); 8] = [
     ("loongjohn", "loongJohn", "en-US"),
 ];
 
-const SPECS: [ModelSpec; 2] = [
+/// CosyVoice-v3-flash system voices. The service has eighty-plus; this is the
+/// reading-shaped subset that the live account accepted. The picker still
+/// accepts a typed id, so the rest stay reachable.
+const COSYVOICE_VOICES: [(&str, &str, &str); 10] = [
+    ("longanyang", "龙安洋", "zh-CN"),
+    ("longanhuan", "龙安欢", "zh-CN"),
+    ("longanhuan_v3", "龙安欢（方言）", "zh-CN"),
+    ("longhuhu_v3", "龙呼呼", "zh-CN"),
+    ("longjiaxin_v3", "龙嘉欣", "zh-HK"),
+    ("longlaotie_v3", "龙老铁", "zh-CN"),
+    ("longsanshu_v3", "龙三叔", "zh-CN"),
+    ("longshuo_v3", "龙硕", "zh-CN"),
+    ("loongabby_v3", "loongabby", "en-US"),
+    ("loongbella_v3", "Bella3.0", "zh-CN"),
+];
+
+fn speech_synthesizer_body(model: &'static str, s: &Synthesis<'_>) -> Value {
+    json!({
+        "model": model,
+        "input": {
+            "text": s.text,
+            "voice": s.voice,
+            "format": "mp3",
+            "sample_rate": s.sample_rate,
+            "rate": s.rate,
+        },
+    })
+}
+
+const SPECS: [ModelSpec; 3] = [
     ModelSpec {
         id: MODEL_QWEN3,
         path: "/api/v1/services/aigc/multimodal-generation/generation",
@@ -137,18 +170,19 @@ const SPECS: [ModelSpec; 2] = [
         // as 36000. Left well short of the edge rather than guessing the rule.
         max_chars: 15_000,
         voices: &QWEN_AUDIO_VOICES,
-        build_body: |s| {
-            json!({
-                "model": MODEL_QWEN_AUDIO,
-                "input": {
-                    "text": s.text,
-                    "voice": s.voice,
-                    "format": "mp3",
-                    "sample_rate": s.sample_rate,
-                    "rate": s.rate,
-                },
-            })
-        },
+        build_body: |s| speech_synthesizer_body(MODEL_QWEN_AUDIO, s),
+    },
+    ModelSpec {
+        id: MODEL_COSYVOICE,
+        path: "/api/v1/services/audio/tts/SpeechSynthesizer",
+        sample_rates: &[48_000, 44_100, 24_000, 22_050, 16_000],
+        // Same SpeechSynthesizer path as qwen-audio. 5000 characters were
+        // accepted with a first packet around 530 ms; the documented 20000
+        // ceiling counts something other than characters, so this stays short
+        // of the edge for the same reason the qwen-audio spec does.
+        max_chars: 15_000,
+        voices: &COSYVOICE_VOICES,
+        build_body: |s| speech_synthesizer_body(MODEL_COSYVOICE, s),
     },
 ];
 
@@ -172,7 +206,7 @@ pub struct AliyunConfig {
 /// Convert the stored 0.0..=1.0 rate into the provider's own multiplier.
 ///
 /// The stored value is normalized around the macOS engine default of 0.5, shown
-/// as 1x on a 0.5x-2x slider, and both model families take exactly that
+/// as 1x on a 0.5x-2x slider, and every model family takes exactly that
 /// multiplier over exactly that range — so unlike Volcengine's -50..=100 this
 /// needs no remapping, only the same clamp.
 fn speed_from_normalized(rate: Option<f32>) -> f32 {
@@ -617,6 +651,15 @@ mod tests {
         assert_eq!(audio["input"]["format"], "mp3");
         assert!(audio["input"].get("language_type").is_none());
         assert!(audio.get("parameters").is_none());
+
+        let cosy = (spec_for(MODEL_COSYVOICE).build_body)(&synthesis);
+        assert_eq!(cosy["model"], MODEL_COSYVOICE);
+        assert_eq!(cosy["input"]["rate"], 1.5);
+        assert_eq!(cosy["input"]["format"], "mp3");
+        assert_eq!(
+            spec_for(MODEL_COSYVOICE).path,
+            spec_for(MODEL_QWEN_AUDIO).path
+        );
     }
 
     #[test]
@@ -695,6 +738,7 @@ mod tests {
         assert_eq!(spec_for("qwen9-tts-imaginary").id, MODEL_QWEN3);
         assert_eq!(default_voice_for("qwen9-tts-imaginary"), "Cherry");
         assert_eq!(default_voice_for(MODEL_QWEN_AUDIO), "longanfengyue");
+        assert_eq!(default_voice_for(MODEL_COSYVOICE), "longanyang");
     }
 
     #[test]
@@ -717,6 +761,16 @@ mod tests {
         });
         let listed = backend.list_voices().unwrap();
         assert!(listed.iter().any(|voice| voice.id == "longanfengyue"));
+        assert!(!listed.iter().any(|voice| voice.id == "Cherry"));
+        assert!(!listed.iter().any(|voice| voice.id == "longanyang"));
+
+        backend.apply_config(AliyunConfig {
+            api_key: "sk-test".to_string(),
+            model: MODEL_COSYVOICE.to_string(),
+        });
+        let listed = backend.list_voices().unwrap();
+        assert!(listed.iter().any(|voice| voice.id == "longanyang"));
+        assert!(!listed.iter().any(|voice| voice.id == "longanfengyue"));
         assert!(!listed.iter().any(|voice| voice.id == "Cherry"));
 
         // The text limit rides along, so a long selection is trimmed to what

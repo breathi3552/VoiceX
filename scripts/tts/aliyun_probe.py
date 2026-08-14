@@ -16,6 +16,7 @@ account the app uses:
     ./scripts/tts/aliyun_probe.py cross       # endpoint / voice interchangeability
     ./scripts/tts/aliyun_probe.py length      # accepted text length
     ./scripts/tts/aliyun_probe.py ws          # WebSocket variants (needs `websockets`)
+    ./scripts/tts/aliyun_probe.py cosyvoice   # CosyVoice-v3 availability on the same account
 
 Every call is billed per input character, so the texts here are deliberately
 short. `length` is the exception and costs a few thousand characters.
@@ -37,8 +38,12 @@ SPEECH_SYNTH = "https://dashscope.aliyuncs.com/api/v1/services/audio/tts/SpeechS
 
 QWEN3 = "qwen3-tts-flash"
 QWEN_AUDIO = "qwen-audio-3.0-tts-flash"
+COSY_FLASH = "cosyvoice-v3-flash"
+COSY_PLUS = "cosyvoice-v3-plus"
+COSY_V35_FLASH = "cosyvoice-v3.5-flash"
 QWEN3_VOICE = "Cherry"
 QWEN_AUDIO_VOICE = "longanfengyue"
+COSY_VOICE = "longanyang"
 
 TEXT = "这是一段用来测量参数是否真的生效的测试文本，长度固定不变。"
 
@@ -55,9 +60,14 @@ def credentials():
     if not row:
         sys.exit("no app_settings row in user_config")
     settings = json.loads(row[0])
-    key = (settings.get("qwenAsrApiKey") or "").strip()
+    key = (
+        settings.get("aliyunTtsApiKey") or settings.get("qwenAsrApiKey") or ""
+    ).strip()
     if not key:
-        sys.exit("no DashScope API key configured (settings key: qwenAsrApiKey)")
+        sys.exit(
+            "no DashScope API key configured "
+            "(settings keys: aliyunTtsApiKey, qwenAsrApiKey)"
+        )
     return key, (settings.get("qwenAsrWorkspaceId") or "").strip()
 
 
@@ -367,17 +377,254 @@ def probe_ws():
     asyncio.run(main())
 
 
+def probe_cosyvoice():
+    """Availability of CosyVoice-v3 on the same SpeechSynthesizer path as
+    qwen-audio-3.0-tts-flash. Short texts only: billed per input character."""
+    short = "测试。"
+    dialect = "叫你去买盐，你买回来一袋面，这不是弄啥嘞吗！"
+
+    def call(label, url, body, stream=False, timeout=60):
+        started = time.time()
+        try:
+            if not stream:
+                with post(url, body, timeout=timeout) as response:
+                    output = json.loads(response.read())
+                audio = (output.get("output") or {}).get("audio") or {}
+                usage = output.get("usage")
+                print(
+                    f"{label:58s} OK   {time.time() - started:5.2f}s  "
+                    f"usage={usage}  has_url={bool(audio.get('url'))}"
+                )
+                return output
+            first = None
+            chunks = total = 0
+            head = None
+            last = None
+            with post(url, body, stream=True, timeout=timeout) as response:
+                for raw in response:
+                    line = raw.decode("utf-8", "replace").strip()
+                    if not line.startswith("data:"):
+                        continue
+                    payload = json.loads(line[5:])
+                    last = payload
+                    if payload.get("code"):
+                        print(
+                            f"{label:58s} SSE_ERR {payload.get('code')}: "
+                            f"{str(payload.get('message'))[:90]}"
+                        )
+                        return None
+                    data = ((payload.get("output") or {}).get("audio") or {}).get("data")
+                    if data:
+                        blob = base64.b64decode(data)
+                        chunks += 1
+                        total += len(blob)
+                        if first is None:
+                            first = time.time() - started
+                            head = blob[:4]
+            usage = (last or {}).get("usage")
+            print(
+                f"{label:58s} SSE  first={first * 1000:.0f}ms  "
+                f"chunks={chunks}  bytes={total}  "
+                f"magic={head.hex() if head else '-'}  usage={usage}"
+            )
+            return last
+        except urllib.error.HTTPError as exc:
+            print(f"{label:58s} {describe_error(exc)}")
+            return None
+        except Exception as exc:
+            print(f"{label:58s} {type(exc).__name__}: {str(exc)[:90]}")
+            return None
+
+    def body(model, voice, text=short, extra=None):
+        payload = {
+            "model": model,
+            "input": {
+                "text": text,
+                "voice": voice,
+                "format": "mp3",
+                "sample_rate": 24000,
+            },
+        }
+        if extra:
+            payload["input"].update(extra)
+        return payload
+
+    print("=== CosyVoice models on SpeechSynthesizer ===")
+    call(f"{COSY_FLASH} + {COSY_VOICE}", SPEECH_SYNTH, body(COSY_FLASH, COSY_VOICE))
+    call(f"{COSY_FLASH} + longanhuan", SPEECH_SYNTH, body(COSY_FLASH, "longanhuan"))
+    call(f"{COSY_FLASH} + longanhuan_v3", SPEECH_SYNTH, body(COSY_FLASH, "longanhuan_v3"))
+    call(f"{COSY_PLUS} + {COSY_VOICE}", SPEECH_SYNTH, body(COSY_PLUS, COSY_VOICE))
+    call(f"{COSY_PLUS} + longanhuan", SPEECH_SYNTH, body(COSY_PLUS, "longanhuan"))
+    call(
+        f"{COSY_V35_FLASH} + {COSY_VOICE} (no system voices)",
+        SPEECH_SYNTH,
+        body(COSY_V35_FLASH, COSY_VOICE),
+    )
+    call(
+        f"{COSY_FLASH} @ multimodal-generation (wrong endpoint)",
+        MULTIMODAL,
+        body(COSY_FLASH, COSY_VOICE),
+    )
+
+    print("\n=== voices do not carry across CosyVoice / Qwen-Audio ===")
+    call(
+        f"{COSY_FLASH} + qwen-audio {QWEN_AUDIO_VOICE}",
+        SPEECH_SYNTH,
+        body(COSY_FLASH, QWEN_AUDIO_VOICE),
+    )
+    call(
+        f"{COSY_FLASH} + qwen-audio longanhuan_v3.6",
+        SPEECH_SYNTH,
+        body(COSY_FLASH, "longanhuan_v3.6"),
+    )
+    call(
+        f"{QWEN_AUDIO} + cosyvoice {COSY_VOICE}",
+        SPEECH_SYNTH,
+        body(QWEN_AUDIO, COSY_VOICE),
+    )
+
+    print("\n=== SSE first packet (the number that decides whether to reuse HTTP) ===")
+    long_text = TEXT + "第二句在这里。第三句也在这里。第四句收尾。"
+    call(
+        f"{COSY_FLASH} SSE mp3",
+        SPEECH_SYNTH,
+        body(COSY_FLASH, COSY_VOICE, text=long_text),
+        stream=True,
+    )
+    call(
+        f"{COSY_PLUS} SSE mp3",
+        SPEECH_SYNTH,
+        body(COSY_PLUS, COSY_VOICE, text=long_text),
+        stream=True,
+    )
+    if WORKSPACE:
+        call(
+            f"{COSY_FLASH} SSE mp3 @ workspace host",
+            f"https://{WORKSPACE}.cn-beijing.maas.aliyuncs.com"
+            "/api/v1/services/audio/tts/SpeechSynthesizer",
+            body(COSY_FLASH, COSY_VOICE, text=long_text),
+            stream=True,
+        )
+
+    print("\n=== representative v3-flash voices (accept / reject) ===")
+    for voice, name in [
+        ("longanyang", "龙安洋"),
+        ("longanhuan", "龙安欢"),
+        ("longanhuan_v3", "龙安欢V3 方言"),
+        ("longhuhu_v3", "龙呼呼 童声"),
+        ("longjiaxin_v3", "龙嘉欣 粤语"),
+        ("longlaotie_v3", "龙老铁 东北"),
+        ("longsanshu_v3", "龙三叔 有声书"),
+        ("longshuo_v3", "龙硕 新闻"),
+        ("loongabby_v3", "loongabby 美式英文"),
+        ("loongbella_v3", "Bella3.0"),
+        ("longxiaochun_v2", "龙小淳 v2 音色（应拒绝）"),
+    ]:
+        call(f"{COSY_FLASH} {voice} ({name})", SPEECH_SYNTH, body(COSY_FLASH, voice))
+
+    print("\n=== rate actually applies (byte length of downloaded mp3) ===")
+    synthesize(
+        "v3-flash baseline",
+        COSY_FLASH,
+        SPEECH_SYNTH,
+        COSY_VOICE,
+        extra_input={"format": "mp3"},
+    )
+    synthesize(
+        "v3-flash input.rate=0.5",
+        COSY_FLASH,
+        SPEECH_SYNTH,
+        COSY_VOICE,
+        extra_input={"format": "mp3", "rate": 0.5},
+    )
+    synthesize(
+        "v3-flash input.rate=2.0",
+        COSY_FLASH,
+        SPEECH_SYNTH,
+        COSY_VOICE,
+        extra_input={"format": "mp3", "rate": 2.0},
+    )
+
+    print("\n=== instruction: accepted, and does it change the audio? ===")
+    baseline = synthesize(
+        "v3-flash longanhuan_v3 no instruct",
+        COSY_FLASH,
+        SPEECH_SYNTH,
+        "longanhuan_v3",
+        extra_input={"format": "mp3"},
+        text=dialect,
+    )
+    instructed = synthesize(
+        "v3-flash longanhuan_v3 请用河南话表达。",
+        COSY_FLASH,
+        SPEECH_SYNTH,
+        "longanhuan_v3",
+        extra_input={"format": "mp3", "instruction": "请用河南话表达。"},
+        text=dialect,
+    )
+    if baseline and instructed:
+        delta = instructed / baseline
+        print(
+            f"{'instruction changed size?':38s} "
+            f"{'yes' if abs(delta - 1.0) > 0.05 else 'no / unclear'}  "
+            f"ratio={delta:.2f}"
+        )
+    call(
+        f"{COSY_PLUS} instruction on system voice",
+        SPEECH_SYNTH,
+        body(
+            COSY_PLUS,
+            COSY_VOICE,
+            extra={"instruction": "你说话的情感是happy。"},
+        ),
+    )
+
+    print("\n=== accepted length (first audio chunk, then disconnect) ===")
+    for count in (500, 2000, 5000):
+        text = "测试文本。" * (count // 5)
+        started = time.time()
+        try:
+            with post(
+                SPEECH_SYNTH,
+                body(COSY_FLASH, COSY_VOICE, text=text),
+                stream=True,
+                timeout=90,
+            ) as response:
+                for raw in response:
+                    line = raw.decode("utf-8", "replace").strip()
+                    if not line.startswith("data:"):
+                        continue
+                    payload = json.loads(line[5:])
+                    if payload.get("code"):
+                        print(
+                            f"{COSY_FLASH:26s} {count:6d} chars  rejected  "
+                            f"{payload.get('code')}: {str(payload.get('message'))[:70]}"
+                        )
+                        return
+                    if ((payload.get("output") or {}).get("audio") or {}).get("data"):
+                        print(
+                            f"{COSY_FLASH:26s} {count:6d} chars  accepted  "
+                            f"first packet {(time.time() - started) * 1000:.0f} ms"
+                        )
+                        break
+        except urllib.error.HTTPError as exc:
+            print(f"{COSY_FLASH:26s} {count:6d} chars  rejected  {describe_error(exc)}")
+            return
+
+
 PROBES = {
     "params": probe_params,
     "sse": probe_sse,
     "cross": probe_cross,
     "length": probe_length,
     "ws": probe_ws,
+    "cosyvoice": probe_cosyvoice,
 }
 
 if __name__ == "__main__":
     requested = sys.argv[1:] or ["all"]
-    names = list(PROBES) if requested == ["all"] else requested
+    # CosyVoice is opt-in: `all` keeps the original two-model research set.
+    names = [name for name in PROBES if name != "cosyvoice"] if requested == ["all"] else requested
     for index, name in enumerate(names):
         if name not in PROBES:
             sys.exit(f"unknown probe {name!r}; choose from {', '.join(PROBES)} or 'all'")

@@ -23,7 +23,7 @@ pub struct TtsVoiceOption {
 /// `provider` is explicit because the settings page asks right after the user
 /// picks one, before the debounced save has written it — resolving it from the
 /// store would answer about the previous provider and list its voices instead.
-/// `model` is explicit for the same reason: under Alibaba Cloud the two model
+/// `model` is explicit for the same reason: under Alibaba Cloud the model
 /// families have entirely separate voice tables, so a stale read there is just
 /// as wrong.
 #[tauri::command]

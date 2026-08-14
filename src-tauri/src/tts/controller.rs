@@ -771,12 +771,14 @@ fn voice_request(settings: &AppSettings, text: String) -> TtsRequest {
 
 /// The Aliyun voice for whichever model is selected.
 ///
-/// The two model families reject each other's voice ids outright, so they get a
-/// setting each and switching model must not carry the old id over — one shared
-/// key would make every model switch produce a guaranteed 400.
+/// The families reject each other's voice ids outright, so they get a setting
+/// each and switching model must not carry the old id over — one shared key
+/// would make every model switch produce a guaranteed 400.
 fn aliyun_voice(settings: &AppSettings) -> String {
     if settings.aliyun_tts_model == aliyun::MODEL_QWEN_AUDIO {
         settings.aliyun_tts_voice_qwen_audio.clone()
+    } else if settings.aliyun_tts_model == aliyun::MODEL_COSYVOICE {
+        settings.aliyun_tts_voice_cosy_voice.clone()
     } else {
         settings.aliyun_tts_voice_qwen3.clone()
     }
@@ -887,15 +889,16 @@ mod tests {
 
     #[test]
     fn the_aliyun_voice_follows_the_selected_model() {
-        // The two families reject each other's voice ids, so switching model
+        // The families reject each other's voice ids, so switching model
         // has to switch voice with it. Carrying one over is not a wrong-sounding
         // voice, it is a guaranteed 400 on the next read.
-        use crate::tts::aliyun::{MODEL_QWEN3, MODEL_QWEN_AUDIO};
+        use crate::tts::aliyun::{MODEL_COSYVOICE, MODEL_QWEN3, MODEL_QWEN_AUDIO};
 
         let mut settings = AppSettings::default();
         settings.tts_provider_type = "aliyun".to_string();
         settings.aliyun_tts_voice_qwen3 = "Dylan".to_string();
         settings.aliyun_tts_voice_qwen_audio = "longanfengyue".to_string();
+        settings.aliyun_tts_voice_cosy_voice = "longanyang".to_string();
 
         settings.aliyun_tts_model = MODEL_QWEN3.to_string();
         assert_eq!(
@@ -907,6 +910,12 @@ mod tests {
         assert_eq!(
             voice_request(&settings, "hi".to_string()).voice.as_deref(),
             Some("longanfengyue")
+        );
+
+        settings.aliyun_tts_model = MODEL_COSYVOICE.to_string();
+        assert_eq!(
+            voice_request(&settings, "hi".to_string()).voice.as_deref(),
+            Some("longanyang")
         );
     }
 
