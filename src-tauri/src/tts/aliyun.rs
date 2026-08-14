@@ -28,7 +28,10 @@ use serde_json::{json, Value};
 
 use super::decode::{decode_mp3_stream, ChunkSource};
 use super::playback::{negotiate_sample_rate_among, Playback, PlaybackHandle};
-use super::{log_event, CancelToken, TtsBackend, TtsError, TtsRequest, TtsStatus, TtsVoice};
+use super::{
+    log_event, split_for_backend, CancelToken, TtsBackend, TtsError, TtsRequest, TtsStatus,
+    TtsVoice,
+};
 
 /// Region host. The workspace-scoped `{id}.cn-beijing.maas.aliyuncs.com` form
 /// is what the documentation now advertises, but the plain host still serves
@@ -323,9 +326,6 @@ impl TtsBackend for AliyunBackend {
             .and_then(|slot| slot.as_ref().and_then(|handle| handle.level()))
     }
 
-    fn max_chars(&self) -> Option<usize> {
-        Some(self.spec().max_chars)
-    }
 }
 
 impl AliyunBackend {
@@ -387,22 +387,38 @@ impl AliyunBackend {
         let http_token = token;
         let http_error = network_error;
         tauri::async_runtime::spawn(async move {
-            let outcome = stream_audio(
-                &config.api_key,
-                spec,
-                &Synthesis {
-                    text: &text,
-                    voice: &voice,
-                    sample_rate,
-                    rate: speed,
-                },
-                &tx,
-                &http_token,
-            )
-            .await;
-            if let Err(err) = outcome {
-                if let Ok(mut slot) = http_error.lock() {
-                    *slot = Some(err);
+            // One request per piece, all feeding the same decoder: the service
+            // caps a request, not a read, and the pieces end on sentence
+            // boundaries, so a seam is audible only as an ordinary pause.
+            let pieces = split_for_backend(&text, spec.max_chars);
+            if pieces.len() > 1 {
+                log_event("speak_chunked", &[("pieces", pieces.len().to_string())]);
+            }
+            for piece in &pieces {
+                let outcome = stream_audio(
+                    &config.api_key,
+                    spec,
+                    &Synthesis {
+                        text: piece,
+                        voice: &voice,
+                        sample_rate,
+                        rate: speed,
+                    },
+                    &tx,
+                    &http_token,
+                )
+                .await;
+                match outcome {
+                    Ok(true) => {}
+                    // Cancelled, or the decoder hung up: synthesizing the
+                    // remaining pieces would only bill text nobody hears.
+                    Ok(false) => break,
+                    Err(err) => {
+                        if let Ok(mut slot) = http_error.lock() {
+                            *slot = Some(err);
+                        }
+                        break;
+                    }
                 }
             }
             // Closing the channel is what ends the decode loop.
@@ -500,14 +516,18 @@ fn run_playback(
     }
 }
 
-/// Stream the synthesis response, forwarding decoded audio bytes to `tx`.
+/// Stream one synthesis response, forwarding decoded audio bytes to `tx`.
+///
+/// `Ok(true)` means the piece completed and the caller may stream the next
+/// one; `Ok(false)` means the read was cancelled or the decoder hung up, so
+/// further pieces would only bill text nobody hears.
 async fn stream_audio(
     api_key: &str,
     spec: &ModelSpec,
     synthesis: &Synthesis<'_>,
     tx: &Sender<Vec<u8>>,
     token: &CancelToken,
-) -> Result<(), String> {
+) -> Result<bool, String> {
     let response = reqwest::Client::new()
         .post(format!("{HOST}{}", spec.path))
         .header("Authorization", format!("Bearer {api_key}"))
@@ -530,7 +550,7 @@ async fn stream_audio(
 
     while let Some(chunk) = stream.next().await {
         if token.is_cancelled() {
-            return Ok(());
+            return Ok(false);
         }
         let chunk = chunk.map_err(|err| format!("stream broke: {err}"))?;
         pending.extend_from_slice(&chunk);
@@ -541,7 +561,7 @@ async fn stream_audio(
             if let Some(audio) = parse_line(&line[..line.len() - 1])? {
                 if tx.send(audio).is_err() {
                     // The decoder is gone; nothing left to stream into.
-                    return Ok(());
+                    return Ok(false);
                 }
             }
         }
@@ -553,7 +573,7 @@ async fn stream_audio(
         }
     }
 
-    Ok(())
+    Ok(true)
 }
 
 /// Decode one SSE line into audio bytes, or `None` when it carries none.
@@ -801,9 +821,9 @@ mod tests {
         assert!(!listed.iter().any(|voice| voice.id == "longanfengyue"));
         assert!(!listed.iter().any(|voice| voice.id == "Cherry"));
 
-        // The text limit rides along, so a long selection is trimmed to what
-        // the model in force actually accepts.
-        assert_eq!(backend.max_chars(), Some(9_000));
+        // The per-request limit rides along with the model; `begin` splits a
+        // longer selection into pieces of at most this size.
+        assert_eq!(spec_for(MODEL_COSYVOICE).max_chars, 9_000);
     }
 
     #[test]
@@ -950,8 +970,8 @@ mod tests {
                 let chunks = drain.join().unwrap_or(0);
 
                 match outcome {
-                    Ok(()) if chunks > 0 => eprintln!("  ok      {} {id} ({name})", spec.id),
-                    Ok(()) => {
+                    Ok(_) if chunks > 0 => eprintln!("  ok      {} {id} ({name})", spec.id),
+                    Ok(_) => {
                         eprintln!("  SILENT  {} {id} ({name})", spec.id);
                         rejected.push(format!("{} {id}: no audio", spec.id));
                     }

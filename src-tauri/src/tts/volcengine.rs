@@ -21,7 +21,10 @@ use serde::Serialize;
 
 use super::decode::{decode_mp3_stream, ChunkSource};
 use super::playback::{negotiate_sample_rate, Playback, PlaybackHandle};
-use super::{log_event, CancelToken, TtsBackend, TtsError, TtsRequest, TtsStatus, TtsVoice};
+use super::{
+    log_event, split_for_backend, CancelToken, TtsBackend, TtsError, TtsRequest, TtsStatus,
+    TtsVoice,
+};
 
 const ENDPOINT: &str = "https://openspeech.bytedance.com/api/v3/tts/unidirectional";
 
@@ -189,9 +192,6 @@ impl TtsBackend for VolcengineBackend {
             .and_then(|slot| slot.as_ref().and_then(|handle| handle.level()))
     }
 
-    fn max_chars(&self) -> Option<usize> {
-        Some(MAX_CHARS)
-    }
 }
 
 impl VolcengineBackend {
@@ -250,19 +250,35 @@ impl VolcengineBackend {
         let http_token = token;
         let http_error = network_error;
         tauri::async_runtime::spawn(async move {
-            let outcome = stream_audio(
-                &config,
-                &text,
-                &speaker,
-                sample_rate,
-                speech_rate,
-                &tx,
-                &http_token,
-            )
-            .await;
-            if let Err(err) = outcome {
-                if let Ok(mut slot) = http_error.lock() {
-                    *slot = Some(err);
+            // One request per piece, all feeding the same decoder: the service
+            // caps a request, not a read, and the pieces end on sentence
+            // boundaries, so a seam is audible only as an ordinary pause.
+            let pieces = split_for_backend(&text, MAX_CHARS);
+            if pieces.len() > 1 {
+                log_event("speak_chunked", &[("pieces", pieces.len().to_string())]);
+            }
+            for piece in &pieces {
+                let outcome = stream_audio(
+                    &config,
+                    piece,
+                    &speaker,
+                    sample_rate,
+                    speech_rate,
+                    &tx,
+                    &http_token,
+                )
+                .await;
+                match outcome {
+                    Ok(true) => {}
+                    // Cancelled, or the decoder hung up: synthesizing the
+                    // remaining pieces would only bill text nobody hears.
+                    Ok(false) => break,
+                    Err(err) => {
+                        if let Ok(mut slot) = http_error.lock() {
+                            *slot = Some(err);
+                        }
+                        break;
+                    }
                 }
             }
             // Closing the channel is what ends the decode loop.
@@ -361,7 +377,12 @@ fn run_playback(
     }
 }
 
-/// Stream the synthesis response, forwarding decoded audio bytes to `tx`.
+/// Stream one synthesis response, forwarding decoded audio bytes to `tx`.
+///
+/// `Ok(true)` means the piece completed and the caller may stream the next
+/// one; `Ok(false)` means the read was cancelled or the decoder hung up, so
+/// further pieces would only bill text nobody hears.
+#[allow(clippy::too_many_arguments)]
 async fn stream_audio(
     config: &VolcengineConfig,
     text: &str,
@@ -370,7 +391,7 @@ async fn stream_audio(
     speech_rate: i32,
     tx: &Sender<Vec<u8>>,
     token: &CancelToken,
-) -> Result<(), String> {
+) -> Result<bool, String> {
     let body = RequestBody {
         user: User { uid: "voicex" },
         req_params: ReqParams {
@@ -406,7 +427,7 @@ async fn stream_audio(
 
     while let Some(chunk) = stream.next().await {
         if token.is_cancelled() {
-            return Ok(());
+            return Ok(false);
         }
         let chunk = chunk.map_err(|err| format!("stream broke: {err}"))?;
         pending.extend_from_slice(&chunk);
@@ -417,7 +438,7 @@ async fn stream_audio(
             if let Some(audio) = parse_line(&line[..line.len() - 1])? {
                 if tx.send(audio).is_err() {
                     // The decoder is gone; nothing left to stream into.
-                    return Ok(());
+                    return Ok(false);
                 }
             }
         }
@@ -429,7 +450,7 @@ async fn stream_audio(
         }
     }
 
-    Ok(())
+    Ok(true)
 }
 
 /// Decode one response line into audio bytes, or `None` when it carries none.

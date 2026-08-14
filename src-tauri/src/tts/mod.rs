@@ -250,48 +250,47 @@ pub trait TtsBackend: Send + Sync {
         None
     }
 
-    /// Longest text this backend will accept, if it has a limit.
-    ///
-    /// `None` means unbounded, which is the case for the local voice — it costs
-    /// nothing per character and can be stopped at any moment. Cloud providers
-    /// are metered and reject oversized requests outright, so the caller
-    /// truncates rather than spending a request that comes back as an error
-    /// (plan §4.5).
-    fn max_chars(&self) -> Option<usize> {
-        None
-    }
 }
 
-/// Cut `text` down to `limit` characters, preferring a sentence boundary.
+/// Split `text` into pieces of at most `limit` characters, cutting at a
+/// sentence boundary where one lands near the edge.
 ///
-/// Truncation is going to be noticed, so it should at least land somewhere a
-/// human would pause. Falls back to the hard cut when the tail holds no
-/// boundary — a wall of text with no punctuation is exactly the case where
-/// hunting for one would throw away most of what fits.
-pub fn truncate_for_backend(text: &str, limit: usize) -> String {
+/// Cloud providers cap a single request, not a read: each backend issues one
+/// request per piece into the same decode pipeline, so a split point is
+/// audible only as the pause a human would take there anyway. Falls back to a
+/// hard cut when a window holds no boundary — a wall of text with no
+/// punctuation is exactly the case where hunting for one would leave the
+/// window nearly empty. Nothing is dropped: the pieces concatenate back to
+/// the input.
+pub fn split_for_backend(text: &str, limit: usize) -> Vec<String> {
     /// How far back to look for a sentence end. Everything here counts
     /// characters, never bytes — a byte-based window silently shrinks to a
     /// third of its intended size on Chinese text.
     const SENTENCE_LOOKBACK: usize = 200;
 
-    if text.chars().count() <= limit {
-        return text.to_string();
+    let chars: Vec<char> = text.chars().collect();
+    if limit == 0 || chars.len() <= limit {
+        return vec![text.to_string()];
     }
 
-    let clipped: Vec<char> = text.chars().take(limit).collect();
-    // A fixed window, not a proportion of the limit: at 5000 characters a
-    // proportional one would happily discard hundreds just to land on a full
-    // stop, which is a worse outcome than the truncation it is smoothing over.
-    let start = clipped.len().saturating_sub(SENTENCE_LOOKBACK);
-    let boundary = clipped[start..]
-        .iter()
-        .rposition(|ch| matches!(ch, '。' | '！' | '？' | '.' | '!' | '?' | '\n'))
-        .map(|offset| start + offset + 1);
-
-    match boundary {
-        Some(end) => clipped[..end].iter().collect(),
-        None => clipped.into_iter().collect(),
+    let mut pieces = Vec::new();
+    let mut start = 0;
+    while chars.len() - start > limit {
+        let window = &chars[start..start + limit];
+        // A fixed window, not a proportion of the limit: at 5000 characters a
+        // proportional one would happily push hundreds into the next piece
+        // just to land on a full stop.
+        let lookback = limit.saturating_sub(SENTENCE_LOOKBACK);
+        let cut = window[lookback..]
+            .iter()
+            .rposition(|ch| matches!(ch, '。' | '！' | '？' | '.' | '!' | '?' | '\n'))
+            .map(|offset| lookback + offset + 1)
+            .unwrap_or(limit);
+        pieces.push(window[..cut].iter().collect());
+        start += cut;
     }
+    pieces.push(chars[start..].iter().collect());
+    pieces
 }
 
 #[cfg(test)]
@@ -299,28 +298,31 @@ mod tests {
     use super::*;
 
     #[test]
-    fn text_within_the_limit_is_left_exactly_as_it_is() {
-        assert_eq!(truncate_for_backend("你好，世界。", 100), "你好，世界。");
+    fn text_within_the_limit_stays_one_piece() {
+        assert_eq!(split_for_backend("你好，世界。", 100), vec!["你好，世界。"]);
         // Exactly at the limit is still within it.
-        assert_eq!(truncate_for_backend("abcde", 5), "abcde");
+        assert_eq!(split_for_backend("abcde", 5), vec!["abcde"]);
     }
 
     #[test]
-    fn truncation_prefers_a_sentence_boundary_near_the_cut() {
-        // Cutting mid-sentence is audible; ending on a full stop is not.
-        let text = "第一句话。第二句话。第三句话在这里被截断";
-        let cut = truncate_for_backend(text, 12);
-        assert_eq!(cut, "第一句话。第二句话。");
-        assert!(cut.chars().count() <= 12);
+    fn splits_prefer_a_sentence_boundary_near_the_cut() {
+        // Cutting mid-sentence is audible; pausing on a full stop is not.
+        let text = "第一句话。第二句话。第三句话在这里继续说下去";
+        let pieces = split_for_backend(text, 12);
+        assert_eq!(pieces[0], "第一句话。第二句话。");
+        assert!(pieces.iter().all(|piece| piece.chars().count() <= 12));
+        assert_eq!(pieces.concat(), text, "a split may pause, never drop");
     }
 
     #[test]
     fn a_wall_of_text_with_no_punctuation_is_cut_at_the_limit() {
-        // Hunting further back for a boundary would throw away most of what
-        // fits, which is worse than the truncation itself.
+        // Hunting further back for a boundary would leave the window nearly
+        // empty and multiply the number of billed requests.
         let text = "あ".repeat(50);
-        let cut = truncate_for_backend(&text, 20);
-        assert_eq!(cut.chars().count(), 20);
+        let pieces = split_for_backend(&text, 20);
+        let lengths: Vec<usize> = pieces.iter().map(|piece| piece.chars().count()).collect();
+        assert_eq!(lengths, vec![20, 20, 10]);
+        assert_eq!(pieces.concat(), text);
     }
 
     #[test]
@@ -328,7 +330,9 @@ mod tests {
         // A multibyte cap measured in bytes would cut a third of the text and,
         // worse, could land inside a character.
         let text = "中".repeat(10);
-        assert_eq!(truncate_for_backend(&text, 6).chars().count(), 6);
+        let pieces = split_for_backend(&text, 6);
+        assert_eq!(pieces[0].chars().count(), 6);
+        assert_eq!(pieces.concat(), text);
     }
 
     #[test]
