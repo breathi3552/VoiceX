@@ -172,7 +172,7 @@ pub struct AppSettings {
     // between them, and the split removes the "is this shared or specific?"
     // question entirely for every provider added later.
     pub tts_enabled: bool,
-    pub tts_provider_type: String, // "system" | "volcengine" | "aliyun"
+    pub tts_provider_type: String, // "system" | "volcengine" | "aliyun" | "mimo"
     /// `None` means the built-in default binding (Option+Command+R).
     pub tts_hotkey_config: Option<String>,
     /// Compatibility mode: fall back to a synthetic Cmd-C when the
@@ -220,6 +220,17 @@ pub struct AppSettings {
     /// 0.5..=2.0 multiplier, so one pair covers them.
     pub aliyun_tts_rate: f32,
     pub aliyun_tts_volume: f32,
+
+    // TTS Provider: Xiaomi MiMo
+    /// A MiMo platform key, the same kind the MiMo ASR provider takes. Stored
+    /// separately for the same reason as the Alibaba pair above.
+    pub mimo_tts_api_key: String,
+    pub mimo_tts_voice: String,
+    /// Optional natural-language style instruction, MiMo's only delivery
+    /// control — the API has no speed or pitch parameter.
+    pub mimo_tts_instruction: String,
+    /// Local playback gain; the API has no volume parameter either.
+    pub mimo_tts_volume: f32,
 
     // Input
     pub input_device_uid: Option<String>,
@@ -447,6 +458,10 @@ impl Default for AppSettings {
             .to_string(),
             aliyun_tts_rate: 0.5,
             aliyun_tts_volume: 1.0,
+            mimo_tts_api_key: String::new(),
+            mimo_tts_voice: crate::tts::mimo::default_voice().to_string(),
+            mimo_tts_instruction: String::new(),
+            mimo_tts_volume: 1.0,
 
             input_device_uid: None,
             text_injection_mode: "pasteboard".to_string(),

@@ -55,13 +55,14 @@ const ttsEnabled = computed({
   }
 })
 
-type ProviderValue = 'system' | 'volcengine' | 'aliyun'
+type ProviderValue = 'system' | 'volcengine' | 'aliyun' | 'mimo'
 type AliyunModel = 'qwen3-tts-flash' | 'qwen-audio-3.0-tts-flash'
 
 const providerOptions = computed(() => [
   { label: t('reading.providerSystem'), value: 'system' },
   { label: t('reading.providerVolcengine'), value: 'volcengine' },
-  { label: t('reading.providerAliyun'), value: 'aliyun' }
+  { label: t('reading.providerAliyun'), value: 'aliyun' },
+  { label: t('reading.providerMimo'), value: 'mimo' }
 ])
 
 const ttsProviderType = computed({
@@ -75,10 +76,11 @@ const ttsProviderType = computed({
 
 const isVolcengine = computed(() => settingsStore.settings.ttsProviderType === 'volcengine')
 const isAliyun = computed(() => settingsStore.settings.ttsProviderType === 'aliyun')
+const isMimo = computed(() => settingsStore.settings.ttsProviderType === 'mimo')
 // Everything that distinguishes "speaks over the network" from "speaks through
 // macOS" — voice list availability, the missing pitch control, whether the
 // controls work off macOS at all.
-const isCloud = computed(() => isVolcengine.value || isAliyun.value)
+const isCloud = computed(() => isVolcengine.value || isAliyun.value || isMimo.value)
 // Empty id is the `say` path (Siri / Spoken Content). Compact AVSpeech voices
 // are everything else in the picker; pitch and volume only exist there.
 const isSystemDefaultVoice = computed(
@@ -123,11 +125,13 @@ const ttsVoiceId = computed({
   get: () => {
     if (isVolcengine.value) return settingsStore.settings.volcTtsSpeaker
     if (isAliyun.value) return settingsStore.settings[aliyunVoiceKey.value]
+    if (isMimo.value) return settingsStore.settings.mimoTtsVoice
     return settingsStore.settings.systemTtsVoiceId
   },
   set: (value: string) => {
     if (isVolcengine.value) settingsStore.updateSetting('volcTtsSpeaker', value)
     else if (isAliyun.value) settingsStore.updateSetting(aliyunVoiceKey.value, value)
+    else if (isMimo.value) settingsStore.updateSetting('mimoTtsVoice', value)
     else settingsStore.updateSetting('systemTtsVoiceId', value)
   }
 })
@@ -147,8 +151,20 @@ const aliyunTtsApiKey = computed({
   set: (value: string) => settingsStore.updateSetting('aliyunTtsApiKey', value)
 })
 
+const mimoTtsApiKey = computed({
+  get: () => settingsStore.settings.mimoTtsApiKey,
+  set: (value: string) => settingsStore.updateSetting('mimoTtsApiKey', value)
+})
+
+const mimoTtsInstruction = computed({
+  get: () => settingsStore.settings.mimoTtsInstruction,
+  set: (value: string) => settingsStore.updateSetting('mimoTtsInstruction', value)
+})
+
 // Rate and volume belong to the provider, not to the feature: engines differ
 // in baseline speed and loudness, so tuning one must not move the other.
+// MiMo is absent here on purpose: its API has no speed parameter, so the rate
+// slider is hidden for it rather than shown doing nothing.
 const rateMultiplier = computed({
   get: () => {
     const stored = isVolcengine.value
@@ -172,13 +188,16 @@ const volumePercent = computed({
       ? settingsStore.settings.volcTtsVolume
       : isAliyun.value
         ? settingsStore.settings.aliyunTtsVolume
-        : settingsStore.settings.systemTtsVolume
+        : isMimo.value
+          ? settingsStore.settings.mimoTtsVolume
+          : settingsStore.settings.systemTtsVolume
     return Math.round(stored * 100)
   },
   set: (value: number) => {
     const stored = clamp(value / 100, 0, 1)
     if (isVolcengine.value) settingsStore.updateSetting('volcTtsVolume', stored)
     else if (isAliyun.value) settingsStore.updateSetting('aliyunTtsVolume', stored)
+    else if (isMimo.value) settingsStore.updateSetting('mimoTtsVolume', stored)
     else settingsStore.updateSetting('systemTtsVolume', stored)
   }
 })
@@ -504,6 +523,35 @@ onBeforeUnmount(() => {
             />
           </div>
         </template>
+
+        <template v-if="isMimo">
+          <div class="field-row">
+            <div class="field-text">
+              <div class="field-label">{{ t('reading.mimoApiKey') }}</div>
+              <div class="field-note">{{ t('reading.mimoApiKeyNote') }}</div>
+            </div>
+            <NInput
+              v-model:value="mimoTtsApiKey"
+              type="password"
+              show-password-on="click"
+              size="small"
+              class="field-control"
+              :placeholder="t('reading.mimoApiKeyPlaceholder')"
+            />
+          </div>
+          <div class="field-row">
+            <div class="field-text">
+              <div class="field-label">{{ t('reading.mimoInstruction') }}</div>
+              <div class="field-note">{{ t('reading.mimoInstructionNote') }}</div>
+            </div>
+            <NInput
+              v-model:value="mimoTtsInstruction"
+              size="small"
+              class="field-control"
+              :placeholder="t('reading.mimoInstructionPlaceholder')"
+            />
+          </div>
+        </template>
       </div>
     </div>
 
@@ -541,7 +589,10 @@ onBeforeUnmount(() => {
           {{ t('reading.voiceLoadFailed') }} — {{ voicesError }}
         </div>
 
-        <div class="field-row">
+        <!-- MiMo has no speed parameter — its only delivery control is the
+             instruction text — so the slider is hidden there rather than
+             shown doing nothing. -->
+        <div v-if="!isMimo" class="field-row">
           <div class="field-text">
             <div class="field-label">{{ t('reading.rate') }}</div>
           </div>

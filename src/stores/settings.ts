@@ -155,7 +155,7 @@ export interface AppSettings {
     // synthesis parameter belongs to a provider block below, rate and volume
     // included: engines differ in baseline speed and loudness.
     ttsEnabled: boolean
-    ttsProviderType: 'system' | 'volcengine' | 'aliyun'
+    ttsProviderType: 'system' | 'volcengine' | 'aliyun' | 'mimo'
     ttsHotkeyConfig: string | null
     ttsClipboardFallback: boolean
 
@@ -184,6 +184,15 @@ export interface AppSettings {
     aliyunTtsVoiceQwenAudio: string
     aliyunTtsRate: number
     aliyunTtsVolume: number
+
+    // TTS Provider: Xiaomi MiMo
+    mimoTtsApiKey: string
+    mimoTtsVoice: string
+    /** Natural-language style instruction — MiMo's only delivery control;
+     * the API has no speed or pitch parameter. Empty means none. */
+    mimoTtsInstruction: string
+    /** Local playback gain; the API has no volume parameter either. */
+    mimoTtsVolume: number
 
     // Input
     inputDeviceUid: string | null
@@ -394,6 +403,11 @@ const defaultSettings: AppSettings = {
     aliyunTtsVoiceQwenAudio: 'longanfengyue',
     aliyunTtsRate: 0.5,
     aliyunTtsVolume: 1,
+
+    mimoTtsApiKey: '',
+    mimoTtsVoice: 'mimo_default',
+    mimoTtsInstruction: '',
+    mimoTtsVolume: 1,
 
     inputDeviceUid: null,
     textInjectionMode: 'pasteboard',

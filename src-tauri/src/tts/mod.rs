@@ -16,6 +16,7 @@ pub mod decode;
 pub mod mac_say;
 #[cfg(target_os = "macos")]
 pub mod mac_system;
+pub mod mimo;
 pub mod playback;
 pub mod volcengine;
 

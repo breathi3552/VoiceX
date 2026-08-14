@@ -14,6 +14,7 @@ use std::thread;
 use tauri::{AppHandle, Emitter};
 
 use super::aliyun::{self, AliyunBackend, AliyunConfig};
+use super::mimo::{MimoBackend, MimoConfig};
 use super::volcengine::{self, VolcengineBackend, VolcengineConfig};
 use super::{
     log_event, truncate_for_backend, SessionSlot, StopReason, TtsBackend, TtsError, TtsRequest,
@@ -45,6 +46,18 @@ const HUD_ERROR_LINGER_MS: u64 = 2_600;
 /// Settings values selecting a cloud backend.
 const PROVIDER_VOLCENGINE: &str = "volcengine";
 const PROVIDER_ALIYUN: &str = "aliyun";
+const PROVIDER_MIMO: &str = "mimo";
+
+/// Whether `provider` names one of the network backends. The controller asks
+/// this in several places — voice listing, request building — and a new cloud
+/// provider that missed one of them would silently fall back to the system
+/// voice there.
+fn is_cloud_provider(provider: &str) -> bool {
+    matches!(
+        provider,
+        PROVIDER_VOLCENGINE | PROVIDER_ALIYUN | PROVIDER_MIMO
+    )
+}
 
 #[derive(Default)]
 struct ControllerInner {
@@ -58,6 +71,7 @@ struct ControllerInner {
     /// rebuilding them — the settings page changes them while the app runs.
     volcengine: Mutex<Option<Arc<VolcengineBackend>>>,
     aliyun: Mutex<Option<Arc<AliyunBackend>>>,
+    mimo: Mutex<Option<Arc<MimoBackend>>>,
     /// Whichever backend owns the current session. `stop` has to reach that
     /// one, not whichever provider the settings happen to name right now.
     active: Mutex<Option<Arc<dyn TtsBackend>>>,
@@ -116,6 +130,12 @@ impl TtsController {
             *slot = Some(Arc::new(AliyunBackend::new(AliyunConfig {
                 api_key: String::new(),
                 model: aliyun::default_model().to_string(),
+            })));
+        }
+        if let Ok(mut slot) = self.inner.mimo.lock() {
+            *slot = Some(Arc::new(MimoBackend::new(MimoConfig {
+                api_key: String::new(),
+                instruction: String::new(),
             })));
         }
     }
@@ -276,6 +296,17 @@ impl TtsController {
                 }
                 log_event("backend_fallback", &[("provider", provider.to_string())]);
             }
+            PROVIDER_MIMO => {
+                let cloud = self.inner.mimo.lock().ok().and_then(|slot| slot.clone());
+                if let (Some(cloud), Some(settings)) = (cloud, settings) {
+                    cloud.apply_config(MimoConfig {
+                        api_key: settings.mimo_tts_api_key.clone(),
+                        instruction: settings.mimo_tts_instruction.clone(),
+                    });
+                    return Some(cloud as Arc<dyn TtsBackend>);
+                }
+                log_event("backend_fallback", &[("provider", provider.to_string())]);
+            }
             _ => {}
         }
 
@@ -345,7 +376,7 @@ impl TtsController {
         // Compact ids come from AVSpeech even when the default speak path is
         // `say`. The picker needs those ids; the empty entry is added in the
         // UI and is not a listed voice.
-        if provider != PROVIDER_VOLCENGINE && provider != PROVIDER_ALIYUN {
+        if !is_cloud_provider(provider) {
             return self
                 .inner
                 .system
@@ -697,14 +728,23 @@ fn voice_request(settings: &AppSettings, text: String) -> TtsRequest {
     let (voice, rate, volume, pitch) = match settings.tts_provider_type.as_str() {
         PROVIDER_VOLCENGINE => (
             settings.volc_tts_speaker.clone(),
-            settings.volc_tts_rate,
+            Some(settings.volc_tts_rate),
             Some(settings.volc_tts_volume),
             None,
         ),
         PROVIDER_ALIYUN => (
             aliyun_voice(settings),
-            settings.aliyun_tts_rate,
+            Some(settings.aliyun_tts_rate),
             Some(settings.aliyun_tts_volume),
+            None,
+        ),
+        // MiMo has no speed parameter at all — the only delivery control is the
+        // instruction text, which travels in the backend's config. Volume is
+        // local playback gain, so that one is real.
+        PROVIDER_MIMO => (
+            settings.mimo_tts_voice.clone(),
+            None,
+            Some(settings.mimo_tts_volume),
             None,
         ),
         _ => {
@@ -713,7 +753,7 @@ fn voice_request(settings: &AppSettings, text: String) -> TtsRequest {
             let say = uses_say_voice(settings);
             (
                 settings.system_tts_voice_id.clone(),
-                settings.system_tts_rate,
+                Some(settings.system_tts_rate),
                 (!say).then_some(settings.system_tts_volume),
                 (!say).then_some(settings.system_tts_pitch),
             )
@@ -723,7 +763,7 @@ fn voice_request(settings: &AppSettings, text: String) -> TtsRequest {
     TtsRequest {
         text,
         voice: Some(voice).filter(|id| !id.trim().is_empty()),
-        rate: Some(rate),
+        rate,
         volume,
         pitch,
     }
@@ -880,6 +920,25 @@ mod tests {
 
         settings.tts_provider_type = "aliyun".to_string();
         assert_eq!(voice_request(&settings, "hi".to_string()).pitch, None);
+
+        settings.tts_provider_type = "mimo".to_string();
+        assert_eq!(voice_request(&settings, "hi".to_string()).pitch, None);
+    }
+
+    #[test]
+    fn a_mimo_request_carries_volume_but_no_rate() {
+        // MiMo has no speed parameter; the settings page hides its rate slider
+        // and the request says `None` rather than a value the backend would
+        // silently ignore. Volume is real — it is local playback gain.
+        let mut settings = AppSettings::default();
+        settings.tts_provider_type = "mimo".to_string();
+        settings.mimo_tts_voice = "冰糖".to_string();
+        settings.mimo_tts_volume = 0.7;
+
+        let request = voice_request(&settings, "hi".to_string());
+        assert_eq!(request.voice.as_deref(), Some("冰糖"));
+        assert_eq!(request.rate, None);
+        assert_eq!(request.volume, Some(0.7));
     }
 
     #[test]
