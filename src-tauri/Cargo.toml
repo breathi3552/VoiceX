@@ -102,6 +102,10 @@ objc2-app-kit = { version = "0.3", features = [
     # per-item type enumeration, neither of which `arboard` exposes.
     "NSPasteboard",
     "NSPasteboardItem",
+    # HUD placement on the screen under the cursor
+    # (NSEvent::mouseLocation + NSScreen::screens)
+    "NSEvent",
+    "NSScreen",
 ] }
 objc2-foundation = { version = "0.3", features = ["NSString", "NSURL", "NSArray", "NSData"] }
 # macOS system voice (AVSpeechSynthesizer). Default features pull in the whole

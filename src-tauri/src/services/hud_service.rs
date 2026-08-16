@@ -2,10 +2,10 @@ use serde_json::json;
 use tauri::async_runtime::JoinHandle;
 use tauri::{AppHandle, Emitter};
 
-use crate::{
-    hud,
-    state::{ProcessingIntent, RecordingStyle},
+use crate::hud::{
+    self, BATCH_HUD_HEIGHT, BATCH_HUD_WIDTH, STREAM_HUD_HEIGHT, STREAM_HUD_WIDTH,
 };
+use crate::state::{ProcessingIntent, RecordingStyle};
 
 /// HUD helper to centralize window show/hide and event emissions.
 #[derive(Clone)]
@@ -36,11 +36,6 @@ impl ReadingPhase {
         }
     }
 }
-
-const STREAM_HUD_WIDTH: f64 = 256.0;
-const STREAM_HUD_HEIGHT: f64 = 100.0;
-const BATCH_HUD_WIDTH: f64 = 204.0;
-const BATCH_HUD_HEIGHT: f64 = 78.0;
 
 #[derive(Default, Clone)]
 struct HudSnapshot {
