@@ -300,6 +300,13 @@ pub fn run() {
                 log::info!("macOS activation policy set to Accessory");
             }
 
+            // App handle for dispatching main-thread AppKit work from the
+            // injector (pasteboard focus round-trip).
+            #[cfg(target_os = "macos")]
+            {
+                let _ = injector::MAIN_THREAD_APP.set(app.handle().clone());
+            }
+
             if let Err(e) = init_app(app) {
                 log::error!("Failed to initialize app: {}", e);
             }

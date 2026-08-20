@@ -142,6 +142,8 @@ const enUS = {
     recentApps: 'Recent apps',
     recentAppsNote: 'Apps that used voice input recently but still follow the default mode.',
     followDefaultMode: 'Follow default (currently: {mode})',
+    skipClipboardRestore: 'Keep pasted text on clipboard',
+    skipClipboardRestoreNote: 'For targets with unreliable clipboard sync such as remote desktop; the injected text stays on the clipboard instead of restoring the previous content.',
     bundleIdValue: 'bundle id: {value}',
     processNameValue: 'Process: {value}',
     lastCapturedAt: 'Last triggered at {time}',

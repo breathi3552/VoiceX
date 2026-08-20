@@ -2,7 +2,7 @@
 import { ref, computed, watch, onMounted, onBeforeUnmount } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
-import { NButton, NSelect, NInputNumber } from 'naive-ui'
+import { NButton, NSelect, NInputNumber, NCheckbox } from 'naive-ui'
 import { useI18n } from 'vue-i18n'
 import { useSettingsStore, type AppSettings } from '../stores/settings'
 import { formatHotkey } from '../utils/hotkey'
@@ -30,6 +30,7 @@ interface RecentTargetApp {
 interface InjectionAppRow extends RecentTargetApp {
   key: string
   overrideMode: TextInjectionModeValue | null
+  overrideSkipRestore: boolean | null
 }
 
 const settingsStore = useSettingsStore()
@@ -139,10 +140,12 @@ const injectionAppRows = computed<InjectionAppRow[]>(() => {
 
   for (const app of recentTargetApps.value) {
     const key = getAppRuleKey(app)
+    const override = textInjectionOverrideMap.value.get(key)
     rows.set(key, {
       ...app,
       key,
-      overrideMode: textInjectionOverrideMap.value.get(key)?.mode ?? null
+      overrideMode: override?.mode ?? null,
+      overrideSkipRestore: override ? (override.skipClipboardRestore ?? false) : null
     })
   }
 
@@ -151,6 +154,7 @@ const injectionAppRows = computed<InjectionAppRow[]>(() => {
     const existing = rows.get(key)
     if (existing) {
       existing.overrideMode = overrideItem.mode
+      existing.overrideSkipRestore = overrideItem.skipClipboardRestore ?? false
       if (!existing.appName) {
         existing.appName = overrideItem.appName
       }
@@ -169,7 +173,8 @@ const injectionAppRows = computed<InjectionAppRow[]>(() => {
       executablePath:
         overrideItem.matchKind === 'executable_path' ? overrideItem.matchValue : null,
       lastSeenAt: null,
-      overrideMode: overrideItem.mode
+      overrideMode: overrideItem.mode,
+      overrideSkipRestore: overrideItem.skipClipboardRestore ?? false
     })
   }
 
@@ -330,6 +335,9 @@ function updateTextInjectionOverride(
   value: TextInjectionOverrideSelectValue | null
 ) {
   const key = getAppRuleKey(app)
+  const existingSkipRestore = settingsStore.settings.textInjectionOverrides.find(
+    (overrideItem) => getAppRuleKey(overrideItem) === key
+  )?.skipClipboardRestore
   const nextOverrides = settingsStore.settings.textInjectionOverrides.filter(
     (overrideItem) => getAppRuleKey(overrideItem) !== key
   )
@@ -340,9 +348,21 @@ function updateTextInjectionOverride(
       appName: app.appName,
       matchKind: app.matchKind,
       matchValue: app.matchValue,
-      mode: value
+      mode: value,
+      skipClipboardRestore: existingSkipRestore ?? false
     })
   }
+
+  settingsStore.updateSetting('textInjectionOverrides', nextOverrides)
+}
+
+function updateSkipClipboardRestore(app: InjectionAppRow, checked: boolean) {
+  const key = getAppRuleKey(app)
+  const nextOverrides = settingsStore.settings.textInjectionOverrides.map((overrideItem) =>
+    getAppRuleKey(overrideItem) === key
+      ? { ...overrideItem, skipClipboardRestore: checked }
+      : overrideItem
+  )
 
   settingsStore.updateSetting('textInjectionOverrides', nextOverrides)
 }
@@ -566,6 +586,21 @@ onBeforeUnmount(() => {
                         <span>{{ getAppIdentityLabel(app) }}</span>
                         <span class="app-override-separator">·</span>
                         <span>{{ getAppUsageLabel(app) }}</span>
+                      </div>
+                      <NCheckbox
+                        v-if="app.overrideMode === 'pasteboard'"
+                        size="small"
+                        class="app-override-restore"
+                        :checked="app.overrideSkipRestore ?? false"
+                        @update:checked="(checked: boolean) => updateSkipClipboardRestore(app, checked)"
+                      >
+                        {{ t('input.skipClipboardRestore') }}
+                      </NCheckbox>
+                      <div
+                        v-if="app.overrideMode === 'pasteboard' && app.overrideSkipRestore"
+                        class="field-note app-override-restore-note"
+                      >
+                        {{ t('input.skipClipboardRestoreNote') }}
                       </div>
                     </div>
                   </div>
@@ -850,6 +885,14 @@ onBeforeUnmount(() => {
 .app-override-select {
   width: 240px;
   flex: 0 0 240px;
+}
+
+.app-override-restore {
+  margin-top: 2px;
+}
+
+.app-override-restore-note {
+  margin-top: 2px;
 }
 
 .app-overrides-empty {

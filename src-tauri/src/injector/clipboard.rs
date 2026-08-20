@@ -38,13 +38,174 @@ const MACOS_COMMAND_KEYCODE: u16 = 55;
 #[cfg(target_os = "macos")]
 const MACOS_V_KEYCODE: u16 = 9;
 
-/// Do not restore the user's clipboard immediately after paste. Remote hosts
-/// often sync clipboard contents asynchronously and can otherwise paste stale
-/// data or receive the restore before the fresh payload is consumed.
+/// How long to wait after paste before the detached restore thread puts the
+/// user's previous clipboard content back. Targets that consume the paste
+/// slowly (remote-desktop bridges, busy apps) need this headroom; it runs off
+/// the injection critical path, so it does not delay injection completion.
 #[cfg(target_os = "macos")]
 const CLIPBOARD_RESTORE_DELAY_MS: u64 = 900;
 #[cfg(not(target_os = "macos"))]
 const CLIPBOARD_RESTORE_DELAY_MS: u64 = 500;
+
+/// How long the paste target stays deactivated while focus bounces through
+/// VoiceX before pasting. Remote-desktop clients on macOS only re-read the
+/// Mac clipboard when they become active again, so the target has to see a
+/// real deactivate → activate cycle before the new payload is announced.
+#[cfg(target_os = "macos")]
+const CLIPBOARD_FOCUS_ROUNDTRIP_AWAY_MS: u64 = 250;
+/// How long to wait after reactivating the target before pasting: the target
+/// regaining focus, its activation-time clipboard read and the remote-side
+/// clipboard update all have to finish before the paste lands.
+#[cfg(target_os = "macos")]
+const CLIPBOARD_FOCUS_ROUNDTRIP_RETURN_MS: u64 = 600;
+
+/// Outcome of trying to make VoiceX the active app during a focus
+/// round-trip. See `focus_roundtrip_before_paste`.
+#[cfg(target_os = "macos")]
+#[derive(Debug, Clone, Copy)]
+enum SelfActivationOutcome {
+    /// VoiceX was already the active app.
+    AlreadyActive,
+    /// Activated without touching the activation policy.
+    Activated,
+    /// Activated after temporarily promoting VoiceX to a regular app; the
+    /// original policy must be restored on the main thread afterwards.
+    ActivatedWithPolicy(objc2_app_kit::NSApplicationActivationPolicy),
+    /// Every activation attempt was denied or ignored.
+    Failed,
+}
+
+/// Poll `cond` every 10ms until it holds or `timeout_ms` elapses.
+#[cfg(target_os = "macos")]
+fn wait_until(cond: impl Fn() -> bool, timeout_ms: u64) -> bool {
+    let deadline = std::time::Instant::now() + Duration::from_millis(timeout_ms);
+    loop {
+        if cond() {
+            return true;
+        }
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// Runtime macOS version check (e.g. `macos_at_least(14)`), used to avoid
+/// calling AppKit APIs that only exist on newer systems.
+#[cfg(target_os = "macos")]
+fn macos_at_least(major: isize) -> bool {
+    use objc2_foundation::NSProcessInfo;
+    NSProcessInfo::processInfo().operatingSystemVersion().majorVersion >= major
+}
+
+/// Run `f` on the app's main thread and wait for its result. Returns `None`
+/// when the main-thread dispatcher is unavailable or the main thread is
+/// stuck for longer than `timeout`.
+#[cfg(target_os = "macos")]
+fn run_on_main_thread_blocking<T: Send + 'static>(
+    f: impl FnOnce() -> T + Send + 'static,
+    timeout: Duration,
+) -> Option<T> {
+    let app = super::MAIN_THREAD_APP.get()?;
+    let (tx, rx) = std::sync::mpsc::sync_channel(1);
+    app.run_on_main_thread(move || {
+        let _ = tx.send(f());
+    })
+    .ok()?;
+    rx.recv_timeout(timeout).ok()
+}
+
+/// Must run on the main thread. Attempts to make VoiceX the active app.
+///
+/// A plain activation request comes first, but macOS 14+ denies
+/// self-activation while another app is frontmost unless the requester is a
+/// regular app — and VoiceX deliberately runs as an accessory app without
+/// Dock presence. The escalation therefore briefly promotes VoiceX to a
+/// regular app (the Dock icon flashes for the duration of the bounce),
+/// activates it, and reports the original policy so the caller can restore
+/// it once the round-trip finishes.
+#[cfg(target_os = "macos")]
+fn activate_self_on_main_thread() -> SelfActivationOutcome {
+    use objc2_app_kit::{
+        NSApplication, NSApplicationActivationOptions, NSApplicationActivationPolicy,
+        NSRunningApplication,
+    };
+
+    let current = NSRunningApplication::currentApplication();
+    if current.isActive() {
+        return SelfActivationOutcome::AlreadyActive;
+    }
+
+    if current.activateWithOptions(NSApplicationActivationOptions::empty())
+        && wait_until(|| current.isActive(), 150)
+    {
+        return SelfActivationOutcome::Activated;
+    }
+
+    let mtm = unsafe { objc2::MainThreadMarker::new_unchecked() };
+    let ns_app = NSApplication::sharedApplication(mtm);
+    let original_policy = ns_app.activationPolicy();
+    let promoted = ns_app.setActivationPolicy(NSApplicationActivationPolicy::Regular);
+    // Deprecated in macOS 14 in favor of `activate()` (called below), but
+    // still the right call on older systems where `activate()` is absent.
+    #[allow(deprecated)]
+    ns_app.activateIgnoringOtherApps(true);
+    if macos_at_least(14) {
+        ns_app.activate();
+    }
+    let activated = wait_until(|| current.isActive(), 300);
+    log::info!(
+        "Focus round-trip: promoted-to-Regular self-activation (policy_changed={}, active={})",
+        promoted,
+        activated
+    );
+    if activated {
+        SelfActivationOutcome::ActivatedWithPolicy(original_policy)
+    } else {
+        // The bounce is not going to happen; undo the promotion right away.
+        let _ = ns_app.setActivationPolicy(original_policy);
+        SelfActivationOutcome::Failed
+    }
+}
+
+/// Must run on the main thread. Reactivates the paste target so its
+/// clipboard bridge re-reads the Mac pasteboard, then restores the
+/// activation policy saved by `activate_self_on_main_thread`.
+#[cfg(target_os = "macos")]
+fn reactivate_target_on_main_thread(
+    target_pid: u32,
+    policy_to_restore: Option<objc2_app_kit::NSApplicationActivationPolicy>,
+) -> bool {
+    use objc2_app_kit::{NSApplication, NSApplicationActivationOptions, NSRunningApplication};
+
+    let mut reactivated = false;
+    if let Some(target) =
+        NSRunningApplication::runningApplicationWithProcessIdentifier(target_pid as libc::pid_t)
+    {
+        let requested = target.activateWithOptions(NSApplicationActivationOptions::empty());
+        reactivated = requested && wait_until(|| target.isActive(), 400);
+        if !reactivated {
+            log::warn!(
+                "Focus round-trip: target reactivation fell short (requested={}, active={})",
+                requested,
+                target.isActive()
+            );
+        }
+    } else {
+        log::warn!(
+            "Focus round-trip: target pid {} is no longer running",
+            target_pid
+        );
+    }
+
+    if let Some(policy) = policy_to_restore {
+        let mtm = unsafe { objc2::MainThreadMarker::new_unchecked() };
+        let ns_app = NSApplication::sharedApplication(mtm);
+        let _ = ns_app.setActivationPolicy(policy);
+    }
+
+    reactivated
+}
 
 #[cfg(target_os = "macos")]
 fn text_chunks(s: &str, max_chars: usize) -> Vec<&str> {
@@ -163,6 +324,7 @@ pub struct TextInjector {
     pre_paste_delay_ms: u64,
     restore_delay_ms: u64,
     skip_clipboard_restore: bool,
+    focus_roundtrip_pid: Option<u32>,
 }
 
 impl TextInjector {
@@ -172,6 +334,7 @@ impl TextInjector {
             pre_paste_delay_ms: CLIPBOARD_PRE_PASTE_DELAY_MS,
             restore_delay_ms: CLIPBOARD_RESTORE_DELAY_MS,
             skip_clipboard_restore: false,
+            focus_roundtrip_pid: None,
         }
     }
 
@@ -189,7 +352,24 @@ impl TextInjector {
             pre_paste_delay_ms: CLIPBOARD_PRE_PASTE_DELAY_MS,
             restore_delay_ms: CLIPBOARD_RESTORE_DELAY_MS,
             skip_clipboard_restore,
+            focus_roundtrip_pid: None,
         }
+    }
+
+    /// Make the pasteboard path bounce focus through VoiceX before pasting.
+    ///
+    /// Remote-desktop clients on macOS only push the Mac clipboard to the
+    /// remote session when they become active again; while they stay
+    /// frontmost — which they are during injection, since VoiceX never takes
+    /// focus — a freshly written clipboard is never announced and the remote
+    /// side keeps pasting stale content. Briefly activating VoiceX and then
+    /// the target app (looked up by pid) forces that deactivate → activate
+    /// cycle, so the new payload is announced before the synthetic paste
+    /// lands. Only effective for the pasteboard path on macOS; elsewhere the
+    /// configured pid is ignored.
+    pub fn with_focus_roundtrip_target(mut self, pid: Option<u32>) -> Self {
+        self.focus_roundtrip_pid = pid;
+        self
     }
 
     /// Inject text using the configured mode
@@ -226,25 +406,120 @@ impl TextInjector {
             .map_err(|e| InjectorError::ClipboardError(e.to_string()))?;
         self.verify_clipboard_text(&mut clipboard, text)?;
 
-        if self.pre_paste_delay_ms > 0 {
+        // 3. Give the target a chance to observe the new clipboard content.
+        // Clipboard-bridge targets get a focus round-trip, which forces the
+        // announcement; plain targets just wait out the pre-paste delay.
+        if !self.run_focus_roundtrip_if_configured() && self.pre_paste_delay_ms > 0 {
             thread::sleep(Duration::from_millis(self.pre_paste_delay_ms));
         }
 
-        // 3. Send paste command
+        // 4. Send paste command
         self.send_paste_command()?;
 
-        // 4. Wait and restore clipboard
-        thread::sleep(Duration::from_millis(self.restore_delay_ms));
+        // 5. Schedule the clipboard restore off the injection critical path.
+        // The restore itself still waits `restore_delay_ms` for the target to
+        // consume the pasted payload, but blocking here would delay injection
+        // completion (and with it InjectDone / the HUD) by that whole delay
+        // on every pasteboard injection.
         if self.skip_clipboard_restore {
             log::debug!(
                 "Skipping clipboard restore for this target (configured as a variable-latency clipboard bridge)"
             );
         } else {
-            self.restore_clipboard_if_unchanged(&mut clipboard, backup, text);
+            self.schedule_clipboard_restore(backup, text);
         }
 
         log::debug!("Injected {} characters via pasteboard", text.len());
         Ok(())
+    }
+
+    /// Perform the activate-self → reactivate-target focus bounce if a
+    /// round-trip target is configured. Returns `true` when a round-trip ran
+    /// (its return wait replaces the plain pre-paste delay).
+    fn run_focus_roundtrip_if_configured(&self) -> bool {
+        let Some(target_pid) = self.focus_roundtrip_pid else {
+            return false;
+        };
+
+        #[cfg(target_os = "macos")]
+        {
+            self.focus_roundtrip_before_paste(target_pid);
+            true
+        }
+
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = target_pid;
+            log::debug!("Focus round-trip is macOS-only; ignoring the configured target");
+            false
+        }
+    }
+
+    /// Bounce focus through VoiceX so the target's clipboard bridge re-reads
+    /// the Mac pasteboard: activate ourselves (the target resigns active),
+    /// wait out the away window, reactivate the target by pid (it becomes
+    /// active again and announces the clipboard), then wait for the
+    /// announcement to reach the remote side before the caller pastes.
+    ///
+    /// Failures are logged and never abort the injection: a paste without
+    /// the round-trip is no worse than the previous behavior.
+    #[cfg(target_os = "macos")]
+    fn focus_roundtrip_before_paste(&self, target_pid: u32) {
+        log::info!(
+            "Focus round-trip: bouncing activation through VoiceX (target pid {})",
+            target_pid
+        );
+
+        let activation =
+            run_on_main_thread_blocking(activate_self_on_main_thread, Duration::from_secs(2));
+        let policy_to_restore = match activation {
+            Some(SelfActivationOutcome::AlreadyActive) => None,
+            Some(SelfActivationOutcome::Activated) => None,
+            Some(SelfActivationOutcome::ActivatedWithPolicy(policy)) => Some(policy),
+            Some(SelfActivationOutcome::Failed) | None => {
+                log::warn!(
+                    "Focus round-trip: self-activation denied; pasting without bridge sync"
+                );
+                if self.pre_paste_delay_ms > 0 {
+                    thread::sleep(Duration::from_millis(self.pre_paste_delay_ms));
+                }
+                return;
+            }
+        };
+
+        thread::sleep(Duration::from_millis(CLIPBOARD_FOCUS_ROUNDTRIP_AWAY_MS));
+
+        match run_on_main_thread_blocking(
+            move || reactivate_target_on_main_thread(target_pid, policy_to_restore),
+            Duration::from_secs(2),
+        ) {
+            Some(true) => {}
+            Some(false) => {
+                log::warn!(
+                    "Focus round-trip: target did not regain active state; pasting anyway"
+                );
+            }
+            None => {
+                log::warn!(
+                    "Focus round-trip: target reactivation dispatch failed; pasting anyway"
+                );
+                // The reactivation hop owns the policy restore; run a
+                // best-effort restore here since it never did.
+                if let Some(policy) = policy_to_restore {
+                    let _ = run_on_main_thread_blocking(
+                        move || {
+                            use objc2_app_kit::NSApplication;
+                            let mtm = unsafe { objc2::MainThreadMarker::new_unchecked() };
+                            let ns_app = NSApplication::sharedApplication(mtm);
+                            let _ = ns_app.setActivationPolicy(policy);
+                        },
+                        Duration::from_secs(1),
+                    );
+                }
+            }
+        }
+
+        thread::sleep(Duration::from_millis(CLIPBOARD_FOCUS_ROUNDTRIP_RETURN_MS));
     }
 
     fn verify_clipboard_text(
@@ -280,8 +555,33 @@ impl TextInjector {
         ))
     }
 
+    /// Restore the clipboard on a detached thread after `restore_delay_ms`.
+    ///
+    /// The delay gives the paste target time to read the injected payload
+    /// before we put the user's previous content back. The restore only fires
+    /// if the clipboard still holds the injected text, so anything the user
+    /// copied in the meantime wins. The thread re-acquires the global
+    /// injection lock (see `inject_serialized`) before touching the clipboard
+    /// so the restore cannot interleave with a newer injection's
+    /// write → verify → paste sequence.
+    fn schedule_clipboard_restore(&self, backup: ClipboardBackup, injected_text: &str) {
+        let delay = Duration::from_millis(self.restore_delay_ms);
+        let injected_text = injected_text.to_string();
+        thread::spawn(move || {
+            thread::sleep(delay);
+            let _guard = super::INJECTION_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+            let mut clipboard = match Clipboard::new() {
+                Ok(clipboard) => clipboard,
+                Err(err) => {
+                    log::warn!("Failed to open clipboard for delayed restore: {}", err);
+                    return;
+                }
+            };
+            Self::restore_clipboard_if_unchanged(&mut clipboard, backup, &injected_text);
+        });
+    }
+
     fn restore_clipboard_if_unchanged(
-        &self,
         clipboard: &mut Clipboard,
         backup: ClipboardBackup,
         injected_text: &str,

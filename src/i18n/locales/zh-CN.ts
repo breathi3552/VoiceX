@@ -142,6 +142,8 @@ const zhCN = {
     recentApps: '最近使用',
     recentAppsNote: '这里展示最近触发过语音输入、但还没单独设置的应用。',
     followDefaultMode: '跟随默认（当前：{mode}）',
+    skipClipboardRestore: '粘贴后不恢复剪贴板',
+    skipClipboardRestoreNote: '适用于远程桌面等剪贴板同步不稳定的场景；开启后剪贴板将保留本次输入的内容，不再恢复粘贴前的内容。',
     bundleIdValue: 'bundle id: {value}',
     processNameValue: '进程名: {value}',
     lastCapturedAt: '最近触发于 {time}',

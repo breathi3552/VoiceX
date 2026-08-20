@@ -176,11 +176,22 @@ pub async fn replay_history_injection(
         let injection_mode = matched_override
             .map(|override_item| TextInjectionMode::from_str(&override_item.mode))
             .unwrap_or_else(|| TextInjectionMode::from_str(&settings.text_injection_mode));
-        // Per-app overrides exist specifically for targets with unusual injection
-        // needs (e.g. remote-desktop clients bridging the clipboard over a
-        // variable-latency channel), so skip the timed clipboard restore for them —
-        // see TextInjector::with_mode's doc comment for why a fixed delay isn't safe.
-        let skip_clipboard_restore_for_override = matched_override.is_some();
+        // Only overrides explicitly marked `skip_clipboard_restore` (targets that
+        // bridge the clipboard over a variable-latency channel, e.g. remote-desktop
+        // clients) keep the injected text on the clipboard; ordinary override
+        // targets get the normal backup → paste → restore behavior.
+        let skip_clipboard_restore_for_override = matched_override
+            .map(|override_item| override_item.skip_clipboard_restore)
+            .unwrap_or(false);
+        // Clipboard-bridge targets additionally need the focus round-trip:
+        // their Mac-side client only announces the clipboard when it becomes
+        // active again, so we bounce activation through VoiceX before pasting
+        // (macOS only; injectors on other platforms ignore the pid).
+        let focus_roundtrip_pid = if skip_clipboard_restore_for_override {
+            Some(target_app.process_id)
+        } else {
+            None
+        };
 
         log::info!(
             "Replay injection target captured: display_name={:?}, process_name={:?}, bundle_id={:?}, pid={}, mode={:?}, override_match={:?}",
@@ -199,7 +210,12 @@ pub async fn replay_history_injection(
 
         let final_text = pipeline.final_text.clone();
         tauri::async_runtime::spawn_blocking(move || {
-            inject_serialized(injection_mode, &final_text, skip_clipboard_restore_for_override)
+            inject_serialized(
+                injection_mode,
+                &final_text,
+                skip_clipboard_restore_for_override,
+                focus_roundtrip_pid,
+            )
         })
         .await
         .map_err(|err| format!("注入任务失败: {err}"))?

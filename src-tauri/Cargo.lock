@@ -6092,6 +6092,7 @@ dependencies = [
  "futures-util",
  "hex",
  "hmac",
+ "libc",
  "log",
  "mp3lame-encoder",
  "objc2",

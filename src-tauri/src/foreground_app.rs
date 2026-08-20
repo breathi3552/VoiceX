@@ -23,6 +23,14 @@ pub struct TextInjectionAppOverride {
     pub match_kind: String,
     pub match_value: String,
     pub mode: String,
+    /// Keep the injected text on the clipboard after pasting instead of
+    /// restoring the previous content. Only meaningful in pasteboard mode,
+    /// and only intended for targets that bridge the clipboard over a
+    /// variable-latency channel (e.g. remote-desktop clients), where a timed
+    /// restore can race the bridge and is not safe to perform. Defaults to
+    /// false: ordinary apps get the backup → paste → restore behavior.
+    #[serde(default)]
+    pub skip_clipboard_restore: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -314,6 +322,7 @@ mod tests {
                 match_kind: "process_name".to_string(),
                 match_value: "windows app".to_string(),
                 mode: "pasteboard".to_string(),
+                skip_clipboard_restore: false,
             },
             TextInjectionAppOverride {
                 platform: "Windows".to_string(),
@@ -321,6 +330,7 @@ mod tests {
                 match_kind: "process_name".to_string(),
                 match_value: "terminal".to_string(),
                 mode: "typing".to_string(),
+                skip_clipboard_restore: false,
             },
         ];
 
@@ -338,6 +348,7 @@ mod tests {
                 match_kind: "bundle_id".to_string(),
                 match_value: "com.microsoft.rdc.macos".to_string(),
                 mode: "pasteboard".to_string(),
+                skip_clipboard_restore: false,
             },
             TextInjectionAppOverride {
                 platform: " macos ".to_string(),
@@ -345,10 +356,42 @@ mod tests {
                 match_kind: "bundle_id".to_string(),
                 match_value: " COM.MICROSOFT.RDC.MACOS ".to_string(),
                 mode: "typing".to_string(),
+                skip_clipboard_restore: false,
             },
         ];
 
         let matched = match_text_injection_override(&app, &overrides).expect("matched override");
         assert_eq!(matched.mode, "typing");
+    }
+
+    #[test]
+    fn override_skip_clipboard_restore_defaults_false_and_round_trips() {
+        // Overrides persisted before the field existed deserialize with false.
+        let legacy = serde_json::json!({
+            "platform": "macOS",
+            "appName": "Windows App",
+            "matchKind": "bundle_id",
+            "matchValue": "com.microsoft.rdc.macos",
+            "mode": "pasteboard",
+        });
+        let parsed: TextInjectionAppOverride = serde_json::from_value(legacy).unwrap();
+        assert!(!parsed.skip_clipboard_restore);
+
+        // Explicit true survives a serialize/deserialize round trip.
+        let with_flag = serde_json::json!({
+            "platform": "macOS",
+            "appName": "Windows App",
+            "matchKind": "bundle_id",
+            "matchValue": "com.microsoft.rdc.macos",
+            "mode": "pasteboard",
+            "skipClipboardRestore": true,
+        });
+        let parsed: TextInjectionAppOverride = serde_json::from_value(with_flag).unwrap();
+        assert!(parsed.skip_clipboard_restore);
+        let serialized = serde_json::to_value(&parsed).unwrap();
+        assert_eq!(
+            serialized.get("skipClipboardRestore").and_then(|v| v.as_bool()),
+            Some(true)
+        );
     }
 }

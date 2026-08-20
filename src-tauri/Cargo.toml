@@ -94,10 +94,14 @@ audiopus_sys = { path = "vendor/audiopus_sys" }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
+libc = "0.2"
 objc2-app-kit = { version = "0.3", features = [
     "NSWindow",
     "NSApplication",
     "NSRunningApplication",
+    # Clipboard-bridge fix: resolve the paste target's NSRunningApplication
+    # by pid for the pre-paste focus round-trip.
+    "libc",
     # Selected-text reading: clipboard snapshot/restore needs changeCount and
     # per-item type enumeration, neither of which `arboard` exposes.
     "NSPasteboard",
@@ -107,7 +111,7 @@ objc2-app-kit = { version = "0.3", features = [
     "NSEvent",
     "NSScreen",
 ] }
-objc2-foundation = { version = "0.3", features = ["NSString", "NSURL", "NSArray", "NSData"] }
+objc2-foundation = { version = "0.3", features = ["NSString", "NSURL", "NSArray", "NSData", "NSProcessInfo"] }
 # macOS system voice (AVSpeechSynthesizer). Default features pull in the whole
 # AVFAudio surface; we only need the speech synthesis headers.
 objc2-avf-audio = { version = "0.3", default-features = false, features = ["std", "AVSpeechSynthesis"] }

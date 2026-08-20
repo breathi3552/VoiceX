@@ -228,8 +228,10 @@ fn migrate_settings_blob(conn: &Connection) {
         }
     };
 
-    let migrated = crate::commands::settings::migrate_llm_custom_endpoints(&mut value);
-    if !migrated {
+    let migrated_endpoints = crate::commands::settings::migrate_llm_custom_endpoints(&mut value);
+    let migrated_restore =
+        crate::commands::settings::migrate_text_injection_override_restore_flag(&mut value);
+    if !migrated_endpoints && !migrated_restore {
         return;
     }
 
@@ -255,7 +257,11 @@ fn migrate_settings_blob(conn: &Connection) {
          ON CONFLICT(key) DO UPDATE SET value = excluded.value",
         params![payload],
     ) {
-        Ok(_) => log::info!("Migrated persisted settings: custom LLM endpoints -> named array"),
+        Ok(_) => log::info!(
+            "Migrated persisted settings (custom LLM endpoints: {}, override restore flag: {})",
+            migrated_endpoints,
+            migrated_restore
+        ),
         Err(e) => log::warn!("Settings migration write-back failed: {}", e),
     }
 }
@@ -841,6 +847,9 @@ pub fn get_settings() -> Result<AppSettings, StorageError> {
             match serde_json::from_str::<serde_json::Value>(&json) {
                 Ok(mut raw) => {
                     crate::commands::settings::migrate_llm_custom_endpoints(&mut raw);
+                    crate::commands::settings::migrate_text_injection_override_restore_flag(
+                        &mut raw,
+                    );
                     match serde_json::from_value::<AppSettings>(raw) {
                         Ok(mut settings) => {
                             crate::commands::settings::normalize_text_injection_overrides(

@@ -378,11 +378,27 @@ impl SessionController {
             .as_ref()
             .map(|override_item| crate::injector::TextInjectionMode::from_str(&override_item.mode))
             .unwrap_or(state.text_injection_mode);
-        // Per-app overrides exist specifically for targets with unusual injection
-        // needs (e.g. remote-desktop clients bridging the clipboard over a
-        // variable-latency channel), so skip the timed clipboard restore for them —
-        // see TextInjector::with_mode's doc comment for why a fixed delay isn't safe.
-        let skip_clipboard_restore_for_override = matched_override.is_some();
+        // Only overrides explicitly marked `skip_clipboard_restore` (targets that
+        // bridge the clipboard over a variable-latency channel, e.g. remote-desktop
+        // clients) keep the injected text on the clipboard; ordinary override
+        // targets get the normal backup → paste → restore behavior.
+        let skip_clipboard_restore_for_override = matched_override
+            .as_ref()
+            .map(|override_item| override_item.skip_clipboard_restore)
+            .unwrap_or(false);
+        // Clipboard-bridge targets additionally need the focus round-trip:
+        // their Mac-side client only announces the clipboard when it becomes
+        // active again, so we bounce activation through VoiceX before pasting
+        // (macOS only; injectors on other platforms ignore the pid).
+        let focus_roundtrip_pid = if skip_clipboard_restore_for_override {
+            state
+                .session_target_app
+                .as_ref()
+                .filter(|app| !app.is_self)
+                .map(|app| app.process_id)
+        } else {
+            None
+        };
         let duration_ms = state.session_duration_ms;
         let audio_path = state
             .session_audio_path
@@ -521,6 +537,7 @@ impl SessionController {
                         final_text.clone(),
                         cancel_flag.clone(),
                         skip_clipboard_restore_for_override,
+                        focus_roundtrip_pid,
                     );
             // Wait for the blocking injection to complete before signalling InjectDone.
             // This prevents a new injection from starting while the previous one is

@@ -204,6 +204,7 @@ export interface AppSettings {
         matchKind: string
         matchValue: string
         mode: 'pasteboard' | 'typing'
+        skipClipboardRestore?: boolean
     }>
 
     // Sync

@@ -654,6 +654,53 @@ pub fn migrate_llm_custom_endpoints(value: &mut serde_json::Value) -> bool {
     true
 }
 
+/// One-time migration for the `skipClipboardRestore` flag on
+/// text-injection overrides.
+///
+/// Overrides created before the field existed effectively skipped the
+/// clipboard restore for *every* override target. Keep that behavior only
+/// for the known remote-desktop client (Windows App, bundle id
+/// `com.microsoft.rdc.macos`), whose variable-latency clipboard bridge makes
+/// a timed restore unsafe; all other overrides gain the normal
+/// backup → paste → restore behavior. Entries that already carry the field
+/// (however set) are left untouched, so users can toggle it afterwards.
+///
+/// Returns `true` when it actually migrated something, so callers can decide
+/// whether to persist the upgraded blob.
+pub fn migrate_text_injection_override_restore_flag(value: &mut serde_json::Value) -> bool {
+    const RDP_BUNDLE_ID: &str = "com.microsoft.rdc.macos";
+
+    let Some(arr) = value
+        .get_mut("textInjectionOverrides")
+        .and_then(|v| v.as_array_mut())
+    else {
+        return false;
+    };
+
+    let mut migrated = false;
+    for entry in arr.iter_mut() {
+        let Some(obj) = entry.as_object_mut() else {
+            continue;
+        };
+        if obj.contains_key("skipClipboardRestore") {
+            continue;
+        }
+        let matches_rdp = obj.get("matchKind").and_then(|v| v.as_str()) == Some("bundle_id")
+            && obj
+                .get("matchValue")
+                .and_then(|v| v.as_str())
+                .is_some_and(|v| v.trim().eq_ignore_ascii_case(RDP_BUNDLE_ID));
+        if matches_rdp {
+            obj.insert(
+                "skipClipboardRestore".to_string(),
+                serde_json::Value::Bool(true),
+            );
+            migrated = true;
+        }
+    }
+    migrated
+}
+
 /// Derive a friendly default name from a base URL host, e.g.
 /// `https://api.deepseek.com/v1` -> `api.deepseek.com`.
 fn custom_endpoint_name_from_base_url(base_url: &str) -> String {
@@ -1084,7 +1131,8 @@ pub async fn clear_soniox_debug_overrides(
 mod tests {
     use super::{
         active_custom_endpoint, apply_llm_provider_selection, migrate_llm_custom_endpoints,
-        normalize_qwen_settings, normalize_text_injection_overrides, AppSettings,
+        migrate_text_injection_override_restore_flag, normalize_qwen_settings,
+        normalize_text_injection_overrides, AppSettings,
     };
     use crate::foreground_app::TextInjectionAppOverride;
     use crate::services::llm_service::build_llm_config_from_settings;
@@ -1166,6 +1214,7 @@ mod tests {
                 match_kind: "bundle_id".to_string(),
                 match_value: "com.microsoft.rdc.macos".to_string(),
                 mode: "pasteboard".to_string(),
+                skip_clipboard_restore: false,
             },
             TextInjectionAppOverride {
                 platform: " macos ".to_string(),
@@ -1173,6 +1222,7 @@ mod tests {
                 match_kind: "bundle_id".to_string(),
                 match_value: " COM.MICROSOFT.RDC.MACOS ".to_string(),
                 mode: "typing".to_string(),
+                skip_clipboard_restore: false,
             },
         ];
 
@@ -1185,6 +1235,58 @@ mod tests {
             "com.microsoft.rdc.macos"
         );
         assert_eq!(settings.text_injection_overrides[0].mode, "typing");
+    }
+
+    #[test]
+    fn migrate_override_restore_flag_marks_only_rdp_and_respects_explicit_values() {
+        let mut value = serde_json::json!({
+            "textInjectionOverrides": [
+                {
+                    "platform": "macos",
+                    "appName": "Windows App",
+                    "matchKind": "bundle_id",
+                    "matchValue": "com.microsoft.rdc.macos",
+                    "mode": "pasteboard"
+                },
+                {
+                    "platform": "macos",
+                    "appName": "TraeWork CN",
+                    "matchKind": "bundle_id",
+                    "matchValue": "cn.trae.solo.app",
+                    "mode": "pasteboard"
+                },
+                {
+                    "platform": "macos",
+                    "appName": "Windows App (manual off)",
+                    "matchKind": "bundle_id",
+                    "matchValue": "com.microsoft.rdc.macos",
+                    "mode": "pasteboard",
+                    "skipClipboardRestore": false
+                }
+            ]
+        });
+
+        assert!(migrate_text_injection_override_restore_flag(&mut value));
+
+        let overrides = value["textInjectionOverrides"].as_array().unwrap();
+        // Legacy RDP override gains the flag so it keeps skipping the restore.
+        assert_eq!(overrides[0]["skipClipboardRestore"], true);
+        // Non-RDP overrides stay untouched and default to restore on read.
+        assert!(overrides[1].get("skipClipboardRestore").is_none());
+        // An explicitly-set value is never overwritten, so users can toggle.
+        assert_eq!(overrides[2]["skipClipboardRestore"], false);
+
+        // Second run is a no-op.
+        assert!(!migrate_text_injection_override_restore_flag(&mut value));
+    }
+
+    #[test]
+    fn migrate_override_restore_flag_handles_missing_or_non_array_shape() {
+        let mut empty = serde_json::json!({});
+        assert!(!migrate_text_injection_override_restore_flag(&mut empty));
+
+        let mut other = serde_json::json!({ "textInjectionOverrides": "not-an-array" });
+        assert!(!migrate_text_injection_override_restore_flag(&mut other));
     }
 
     #[test]
