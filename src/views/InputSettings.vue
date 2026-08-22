@@ -2,7 +2,7 @@
 import { ref, computed, watch, onMounted, onBeforeUnmount } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
-import { NButton, NSelect, NInputNumber, NCheckbox } from 'naive-ui'
+import { NButton, NSelect, NInputNumber, NCheckbox, NSwitch } from 'naive-ui'
 import { useI18n } from 'vue-i18n'
 import { useSettingsStore, type AppSettings } from '../stores/settings'
 import { formatHotkey } from '../utils/hotkey'
@@ -83,6 +83,14 @@ const maxRecordingOptions = computed(() => [
 const maxRecordingMinutes = computed({
   get: () => settingsStore.settings.maxRecordingMinutes,
   set: (v: number) => settingsStore.updateSetting('maxRecordingMinutes', v)
+})
+
+const hudTransparent = computed({
+  get: () => settingsStore.settings.hudTransparent,
+  set: (v: boolean) => {
+    settingsStore.updateSetting('hudTransparent', v)
+    void settingsStore.forceSaveSettings()
+  }
 })
 
 const asrRecordingHardLimitMinutes = computed(() =>
@@ -508,6 +516,22 @@ onBeforeUnmount(() => {
               {{ t('input.refreshDevices') }}
             </NButton>
           </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="surface-card input-card">
+      <div class="card-header">
+        <div class="card-title">{{ t('input.overlay') }}</div>
+        <div class="card-sub">{{ t('input.overlaySub') }}</div>
+      </div>
+      <div class="field-list">
+        <div class="field-row">
+          <div class="field-text">
+            <div class="field-label">{{ t('input.translucent') }}</div>
+            <div class="field-note">{{ t('input.translucentNote') }}</div>
+          </div>
+          <NSwitch v-model:value="hudTransparent" />
         </div>
       </div>
     </div>

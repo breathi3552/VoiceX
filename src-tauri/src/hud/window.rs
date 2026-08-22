@@ -15,6 +15,12 @@ const HUD_MIN_WIDTH: f64 = 128.0;
 const HUD_MAX_WIDTH: f64 = 560.0;
 const HUD_MIN_HEIGHT: f64 = 56.0;
 const HUD_MAX_HEIGHT: f64 = 120.0;
+/// macOS whole-window opacity via `NSWindow::setAlphaValue` when the setting
+/// is on. Windows does not read this: it keeps the native window
+/// composition-transparent and changes CSS alpha instead (see
+/// `apply_windows_hud_appearance`).
+#[cfg(target_os = "macos")]
+const HUD_WINDOW_ALPHA: f64 = 0.88;
 
 /// Desired logical content size, last set via `set_hud_content_bounds`.
 ///
@@ -33,22 +39,24 @@ fn desired_bounds() -> (f64, f64) {
         .expect("DESIRED_BOUNDS mutex poisoned")
 }
 
+fn hud_transparent_from_settings() -> bool {
+    crate::storage::get_settings()
+        .map(|settings| settings.hud_transparent)
+        .unwrap_or(false)
+}
+
 /// Create the HUD window
 pub fn create_hud_window(app: &AppHandle) -> Result<(), HudError> {
+    let transparent = hud_transparent_from_settings();
+
     if let Some(existing) = app.get_webview_window("hud") {
         reposition_hud_window(&existing)?;
-
-        #[cfg(target_os = "macos")]
-        configure_macos_hud(&existing)?;
-
-        #[cfg(target_os = "windows")]
-        configure_windows_hud(&existing)?;
-
+        apply_platform_hud_appearance(app, &existing, transparent)?;
         return Ok(());
     }
 
     let (width, height) = desired_bounds();
-    let window =
+    let builder =
         WebviewWindowBuilder::new(app, "hud", WebviewUrl::App("src/hud/index.html".into()))
             .title("VoiceX HUD")
             .inner_size(width, height)
@@ -57,22 +65,70 @@ pub fn create_hud_window(app: &AppHandle) -> Result<(), HudError> {
             .always_on_top(true)
             .skip_taskbar(true)
             .focused(false)
-            .visible(false)
-            .build()
-            .map_err(|e| HudError::CreateFailed(e.to_string()))?;
+            .visible(false);
+
+    // Windows: composition transparency is a create-time WebView2 flag.
+    // The user setting only changes CSS alpha on top of it — recreating the
+    // window on toggle would flash and could race a live recording.
+    // `shadow(false)` avoids the 1px white border Tauri draws on undecorated
+    // Windows windows, which would show through a translucent fill.
+    #[cfg(target_os = "windows")]
+    let builder = builder
+        .transparent(true)
+        .shadow(false)
+        .background_color(tauri::window::Color(0, 0, 0, 0));
+
+    let window = builder
+        .build()
+        .map_err(|e| HudError::CreateFailed(e.to_string()))?;
 
     // Position at the bottom center of the screen under the cursor
     position_hud_window(&window, width, height)?;
-
-    // Platform-specific configuration
-    #[cfg(target_os = "macos")]
-    configure_macos_hud(&window)?;
-
-    #[cfg(target_os = "windows")]
-    configure_windows_hud(&window)?;
+    apply_platform_hud_appearance(app, &window, transparent)?;
 
     log::info!("HUD window created");
     Ok(())
+}
+
+/// Apply the current overlay appearance to an already-created HUD.
+///
+/// macOS changes `NSWindow` alpha. Windows emits a CSS class change; the
+/// native window stays composition-transparent for the lifetime of the process.
+pub fn apply_hud_appearance(app: &AppHandle, transparent: bool) {
+    if let Err(err) = apply_hud_appearance_inner(app, transparent) {
+        log::warn!("Failed to apply HUD appearance: {err}");
+    }
+}
+
+fn apply_hud_appearance_inner(app: &AppHandle, transparent: bool) -> Result<(), HudError> {
+    let Some(window) = app.get_webview_window("hud") else {
+        return Ok(());
+    };
+    apply_platform_hud_appearance(app, &window, transparent)
+}
+
+fn apply_platform_hud_appearance(
+    app: &AppHandle,
+    window: &tauri::WebviewWindow,
+    transparent: bool,
+) -> Result<(), HudError> {
+    #[cfg(target_os = "macos")]
+    {
+        let _ = app;
+        return configure_macos_hud(window, transparent);
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        let _ = window;
+        return apply_windows_hud_appearance(app, transparent);
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        let _ = (app, window, transparent);
+        Ok(())
+    }
 }
 
 fn reposition_hud_window(window: &tauri::WebviewWindow) -> Result<(), HudError> {
@@ -332,8 +388,17 @@ pub fn set_hud_content_bounds(app: &AppHandle, width: f64, height: f64) -> Resul
 }
 
 #[cfg(target_os = "macos")]
-fn configure_macos_hud(window: &tauri::WebviewWindow) -> Result<(), HudError> {
+fn configure_macos_hud(
+    window: &tauri::WebviewWindow,
+    transparent: bool,
+) -> Result<(), HudError> {
     use objc2_app_kit::{NSWindow, NSWindowCollectionBehavior};
+
+    let alpha = if transparent {
+        HUD_WINDOW_ALPHA
+    } else {
+        1.0
+    };
 
     window
         .with_webview(move |webview| {
@@ -360,6 +425,11 @@ fn configure_macos_hud(window: &tauri::WebviewWindow) -> Result<(), HudError> {
                 // Click-through HUD: never intercept mouse interactions from the
                 // currently focused app underneath.
                 ns_win.setIgnoresMouseEvents(true);
+
+                // Public API: composites the entire HUD (chrome + webview)
+                // against whatever is underneath. No macos-private-api needed.
+                // CSS stays opaque so this alpha is the only fade.
+                ns_win.setAlphaValue(alpha);
             }
         })
         .map_err(|e| HudError::PlatformConfigFailed(format!("{e:?}")))?;
@@ -368,14 +438,18 @@ fn configure_macos_hud(window: &tauri::WebviewWindow) -> Result<(), HudError> {
 }
 
 #[cfg(target_os = "windows")]
-fn configure_windows_hud(_window: &tauri::WebviewWindow) -> Result<(), HudError> {
-    // TODO: Set WS_EX_TRANSPARENT | WS_EX_LAYERED
-    log::debug!("Windows HUD configuration pending");
-    Ok(())
-}
+fn apply_windows_hud_appearance(app: &AppHandle, transparent: bool) -> Result<(), HudError> {
+    use tauri::Emitter;
 
-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
-fn configure_platform_hud(_window: &tauri::WebviewWindow) -> Result<(), HudError> {
+    // Click-through (WS_EX_TRANSPARENT) is a separate concern. Do not use
+    // WS_EX_LAYERED / SetLayeredWindowAttributes for this visual: that style
+    // fights WebView2's compositor, which `transparent(true)` already uses.
+    app.emit_to(
+        "hud",
+        "hud:appearance",
+        serde_json::json!({ "transparent": transparent }),
+    )
+    .map_err(|e| HudError::PlatformConfigFailed(e.to_string()))?;
     Ok(())
 }
 

@@ -28,6 +28,14 @@ body {
     -moz-osx-font-smoothing: grayscale;
 }
 
+/* Windows only: the native window is composition-transparent for its whole
+   lifetime, so CSS alpha reaches the desktop. macOS keeps these backgrounds
+   opaque and fades the NSWindow instead — applying both would compound. */
+body.hud-windows.hud-translucent,
+body.hud-windows.hud-translucent .hud-container {
+    background: rgba(43, 43, 43, 0.88);
+}
+
 #hud {
     /* Window size is controlled by Rust; content should fill the window. */
     width: 100%;

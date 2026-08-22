@@ -241,6 +241,9 @@ pub struct AppSettings {
     pub input_device_uid: Option<String>,
     pub text_injection_mode: String, // "pasteboard" or "typing"
     pub text_injection_overrides: Vec<TextInjectionAppOverride>,
+    /// Overlay see-through. macOS uses `NSWindow::setAlphaValue`; Windows
+    /// uses CSS alpha on a composition-transparent WebView2 window.
+    pub hud_transparent: bool,
 
     // Sync
     pub sync_enabled: bool,
@@ -475,6 +478,7 @@ impl Default for AppSettings {
             input_device_uid: None,
             text_injection_mode: "pasteboard".to_string(),
             text_injection_overrides: Vec::new(),
+            hud_transparent: false,
 
             sync_enabled: false,
             sync_server_url: String::new(),
@@ -1019,6 +1023,10 @@ pub fn save_settings(
 
     crate::storage::save_settings(&settings).map_err(|e| e.to_string())?;
 
+    if settings.hud_transparent != current_settings.hud_transparent {
+        crate::hud::apply_hud_appearance(&app, settings.hud_transparent);
+    }
+
     if !settings.enable_diagnostics {
         debug.clear_soniox_debug_overrides_now()?;
     }
@@ -1198,6 +1206,10 @@ mod tests {
         assert_eq!(settings.system_tts_pitch, 1.0);
         assert_eq!(settings.volc_tts_rate, 0.5);
         assert!(settings.tts_clipboard_fallback);
+        assert!(
+            !settings.hud_transparent,
+            "legacy blobs default to an opaque HUD"
+        );
         assert!(
             settings.tts_hotkey_config.is_none(),
             "no stored binding means the built-in default"

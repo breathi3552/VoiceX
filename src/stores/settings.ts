@@ -206,6 +206,7 @@ export interface AppSettings {
         mode: 'pasteboard' | 'typing'
         skipClipboardRestore?: boolean
     }>
+    hudTransparent: boolean
 
     // Sync
     syncEnabled: boolean
@@ -415,6 +416,7 @@ const defaultSettings: AppSettings = {
     inputDeviceUid: null,
     textInjectionMode: 'pasteboard',
     textInjectionOverrides: [],
+    hudTransparent: false,
 
     syncEnabled: false,
     syncServerUrl: '',

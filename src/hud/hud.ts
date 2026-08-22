@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import zhCN from "../i18n/locales/zh-CN";
 import enUS from "../i18n/locales/en-US";
+import { isWindows } from "../utils/platform";
 
 const statusIcon = document.getElementById("statusIcon");
 const countdown = document.getElementById("countdown");
@@ -28,6 +29,17 @@ const BATCH_WAVEFORM_STYLE: "timeline" | "hybrid" = "timeline";
 const WAVEFORM_BAR_COUNT = 27;
 const HYBRID_BAND_COUNT = 8;
 const HYBRID_HISTORY_COLUMNS = 26;
+
+if (isWindows) {
+  document.body.classList.add("hud-windows");
+}
+
+function setHudTranslucent(enabled: boolean) {
+  if (!isWindows) {
+    return;
+  }
+  document.body.classList.toggle("hud-translucent", enabled);
+}
 
 if (waveformBars && waveformBars.childElementCount === 0) {
   const fragment = document.createDocumentFragment();
@@ -969,6 +981,17 @@ async function initListeners() {
   await add<{ locale?: "zh-CN" | "en-US" }>("ui:locale-changed", (event) => {
     setHudLocale(event.payload?.locale);
   });
+
+  await add<{ transparent?: boolean }>("hud:appearance", (event) => {
+    setHudTranslucent(Boolean(event.payload?.transparent));
+  });
+
+  try {
+    const settings = await invoke<{ hudTransparent?: boolean }>("get_settings");
+    setHudTranslucent(Boolean(settings?.hudTransparent));
+  } catch (err: unknown) {
+    console.error("[HUD] Failed to load appearance:", err);
+  }
 
   window.addEventListener("beforeunload", () => {
     if (waveformFrameId) {
