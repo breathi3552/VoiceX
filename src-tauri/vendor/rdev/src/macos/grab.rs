@@ -6,12 +6,20 @@ use cocoa::foundation::NSAutoreleasePool;
 use core_graphics::event::{CGEventTapLocation, CGEventType};
 use lazy_static::lazy_static;
 use std::os::raw::c_void;
+use std::sync::atomic::{AtomicPtr, Ordering};
 use std::sync::Mutex;
 
 lazy_static! {
     static ref GLOBAL_CALLBACK: Mutex<Option<Box<dyn FnMut(Event) -> Option<Event> + Send>>> =
         Mutex::new(None);
 }
+
+/// The live event tap, kept so the callback can re-enable it. The system
+/// disables a tap it considers unresponsive (and around secure input), telling
+/// it via a TapDisabledBy* callback; a tap that never re-enables itself stays
+/// dead — every hotkey silently stops working — and the events missed while it
+/// was off are gone either way.
+static TAP: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
 
 #[link(name = "Cocoa", kind = "framework")]
 extern "C" {}
@@ -22,6 +30,17 @@ unsafe extern "C" fn raw_callback(
     cg_event: CGEventRef,
     _user_info: *mut c_void,
 ) -> CGEventRef {
+    if matches!(
+        _type,
+        CGEventType::TapDisabledByTimeout | CGEventType::TapDisabledByUserInput
+    ) {
+        let tap = TAP.load(Ordering::SeqCst);
+        if !tap.is_null() {
+            eprintln!("rdev grab: event tap disabled ({_type:?}); re-enabling");
+            CGEventTapEnable(tap as CFMachPortRef, true);
+        }
+        return cg_event;
+    }
     if let Some(event) = convert(_type, &cg_event) {
         if let Ok(mut guard) = GLOBAL_CALLBACK.lock() {
             if let Some(callback) = guard.as_mut() {
@@ -56,6 +75,7 @@ where
         if tap.is_null() {
             return Err(GrabError::EventTapError);
         }
+        TAP.store(tap as *mut c_void, Ordering::SeqCst);
         let _loop = CFMachPortCreateRunLoopSource(nil, tap, 0);
         if _loop.is_null() {
             return Err(GrabError::LoopSourceError);
