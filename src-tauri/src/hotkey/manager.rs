@@ -34,6 +34,77 @@ enum HookEvent {
     ReadSelectionEscape,
     /// The dictation hotkey went down; reading must yield to it.
     DictationTakesOver,
+    /// Diagnostic snapshot of a shortcut-shaped key press (root-cause hunt for
+    /// "the first press does nothing"). Sent through the channel so the tap
+    /// callback itself never does IO.
+    #[cfg(target_os = "macos")]
+    Diag(DiagSnapshot),
+}
+
+/// What the hook believed vs. what the session actually held, at the moment a
+/// non-modifier key went down with modifiers involved. `tracked_*` comes from
+/// the event-driven [`ModifierState`]; `actual_*` from
+/// `CGEventSourceFlagsState`, which cannot go stale. A mismatch is the
+/// modifier-state desync in person.
+#[cfg(target_os = "macos")]
+#[derive(Debug)]
+struct DiagSnapshot {
+    key_code: u32,
+    tracked_mods: u32,
+    actual_mods: u32,
+    tracked_fn: bool,
+    actual_fn: bool,
+    /// Tracked and authoritative state disagree, after accounting for the
+    /// pressed key's own stripped bit. With the sync in place this should
+    /// never be true again; a `true` here is a regression alarm, which is why
+    /// the diag line stays in.
+    desynced: bool,
+    dictation_match: bool,
+    read_match: bool,
+    read_latched: bool,
+    suspended: u32,
+}
+
+/// The modifier bit a key contributes to the flags itself, which
+/// [`HotkeySnapshot::from_event`] strips from its own snapshot. The diag
+/// comparison has to strip the same bit from the authoritative side, or every
+/// modifier press would read as a false desync.
+#[cfg(target_os = "macos")]
+fn own_modifier_bit(key_code: u32) -> u32 {
+    match key_code {
+        56 | 60 => 0x0200, // shift
+        59 | 62 => 0x1000, // control
+        58 | 61 => 0x0800, // option
+        55 | 54 => 0x0100, // command
+        _ => 0,
+    }
+}
+
+/// The session's live modifier flags, as our internal modifier bits plus the
+/// Fn state. Authoritative: unlike the event-tracked state it does not depend
+/// on having seen every FlagsChanged event.
+#[cfg(target_os = "macos")]
+fn authoritative_modifier_bits() -> (u32, bool) {
+    #[link(name = "CoreGraphics", kind = "framework")]
+    extern "C" {
+        fn CGEventSourceFlagsState(state_id: u32) -> u64;
+    }
+    const COMBINED_SESSION_STATE: u32 = 0;
+    let flags = unsafe { CGEventSourceFlagsState(COMBINED_SESSION_STATE) };
+    let mut bits = 0u32;
+    if flags & 0x0004_0000 != 0 {
+        bits |= 0x1000; // control
+    }
+    if flags & 0x0008_0000 != 0 {
+        bits |= 0x0800; // option
+    }
+    if flags & 0x0002_0000 != 0 {
+        bits |= 0x0200; // shift
+    }
+    if flags & 0x0010_0000 != 0 {
+        bits |= 0x0100; // command
+    }
+    (bits, flags & 0x0080_0000 != 0)
 }
 
 /// State of the selected-text reading binding, as the settings page sees it.
@@ -180,6 +251,25 @@ impl HotkeyManager {
                                 controller.stop_for_dictation();
                             }
                         }
+                        #[cfg(target_os = "macos")]
+                        HookEvent::Diag(diag) => {
+                            log::info!(
+                                target: "voicex::hotkey",
+                                "event=hook_press key={} tracked_mods={:#06x} actual_mods={:#06x} \
+                                 tracked_fn={} actual_fn={} desynced={} dict_match={} \
+                                 read_match={} read_latched={} suspended={}",
+                                diag.key_code,
+                                diag.tracked_mods,
+                                diag.actual_mods,
+                                diag.tracked_fn,
+                                diag.actual_fn,
+                                diag.desynced,
+                                diag.dictation_match,
+                                diag.read_match,
+                                diag.read_latched,
+                                diag.suspended,
+                            );
+                        }
                     }
                 }
             });
@@ -189,7 +279,20 @@ impl HotkeyManager {
                 let mut suppress = false;
                 match event.event_type {
                     EventType::KeyPress(key) => {
+                        // The authoritative session flags, queried once per
+                        // press. The event-driven state below is re-seeded from
+                        // them every time: it can go stale whenever the tap
+                        // misses a FlagsChanged event (tap disabled, secure
+                        // input, misclassified press/release), and a stale
+                        // modifier silently un-matches every combo until the
+                        // user's own key releases repair it — the "first press
+                        // does nothing, second works" bug.
+                        #[cfg(target_os = "macos")]
+                        let (auth_mods, auth_fn) = authoritative_modifier_bits();
+
                         let mut mods = modifier_state.borrow_mut();
+                        #[cfg(target_os = "macos")]
+                        mods.sync_from_bits(auth_mods, auth_fn);
                         mods.on_press(key);
                         if key == Key::Escape {
                             let _ = hook_tx.send(HookEvent::EscapePressed);
@@ -238,6 +341,41 @@ impl HotkeyManager {
                                 read_selection_uses_fn.load(Ordering::SeqCst),
                             );
 
+                            // Diagnostics for the modifier-state desync class of
+                            // bug: whenever a key goes down that looks like a
+                            // shortcut (Ctrl/Option/Cmd/Fn involved on either
+                            // view), record what the event-tracked state and the
+                            // authoritative session flags each claim. Shift-only
+                            // presses are ordinary typing and stay out of the log.
+                            #[cfg(target_os = "macos")]
+                            {
+                                let shortcut_shaped = (snapshot.modifiers | auth_mods) & !0x0200
+                                    != 0
+                                    || snapshot.uses_fn
+                                    || auth_fn;
+                                if shortcut_shaped {
+                                    // The pressed key's own bit is stripped from
+                                    // the snapshot but present in the session
+                                    // flags; the fn state lags on the Fn key's
+                                    // own press. Neither is a desync.
+                                    let desynced = snapshot.modifiers
+                                        != auth_mods & !own_modifier_bit(cfg.key_code)
+                                        || (cfg.key_code != 63 && snapshot.uses_fn != auth_fn);
+                                    let _ = hook_tx.send(HookEvent::Diag(DiagSnapshot {
+                                        key_code: cfg.key_code,
+                                        tracked_mods: snapshot.modifiers,
+                                        actual_mods: auth_mods,
+                                        tracked_fn: snapshot.uses_fn,
+                                        actual_fn: auth_fn,
+                                        desynced,
+                                        dictation_match: active_match,
+                                        read_match: read_selection_match,
+                                        read_latched: read_selection_key.borrow().is_some(),
+                                        suspended: suspension_count.load(Ordering::SeqCst),
+                                    }));
+                                }
+                            }
+
                             if enabled
                                 && active_match
                                 && suspension_count.load(Ordering::SeqCst) == 0
@@ -273,7 +411,18 @@ impl HotkeyManager {
                         }
                     }
                     EventType::KeyRelease(key) => {
-                        modifier_state.borrow_mut().on_release(key);
+                        {
+                            let mut mods = modifier_state.borrow_mut();
+                            // Same re-seed as on press, so the tracked state
+                            // never carries a stale modifier across events even
+                            // between presses.
+                            #[cfg(target_os = "macos")]
+                            {
+                                let (auth_mods, auth_fn) = authoritative_modifier_bits();
+                                mods.sync_from_bits(auth_mods, auth_fn);
+                            }
+                            mods.on_release(key);
+                        }
 
                         // Recording mode: send accumulated config on key release
                         if recording_active.load(Ordering::SeqCst) {
@@ -515,6 +664,20 @@ struct ModifierState {
 }
 
 impl ModifierState {
+    /// Re-seed from the authoritative session flags. The event-driven updates
+    /// below still run afterwards for the key in hand — the session state can
+    /// lag behind the very event being processed — but any modifier this state
+    /// wrongly remembered from a missed or misclassified earlier event is
+    /// corrected here before it can un-match a combo.
+    #[cfg(target_os = "macos")]
+    fn sync_from_bits(&mut self, bits: u32, fn_key: bool) {
+        self.ctrl = bits & 0x1000 != 0;
+        self.alt = bits & 0x0800 != 0;
+        self.shift = bits & 0x0200 != 0;
+        self.meta = bits & 0x0100 != 0;
+        self.fn_key = fn_key;
+    }
+
     fn on_press(&mut self, key: Key) {
         match key {
             Key::ControlLeft | Key::ControlRight => self.ctrl = true,
