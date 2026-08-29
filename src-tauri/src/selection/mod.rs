@@ -114,6 +114,12 @@ pub enum SelectionError {
     #[error("Hotkey modifiers are still held; cannot synthesize a copy")]
     ModifiersHeld,
 
+    /// The session was cancelled while the read was in progress (stop hotkey,
+    /// Escape, a superseding read). Never surfaced to the user: the caller
+    /// discards the whole result of a cancelled read before looking at it.
+    #[error("The read was cancelled")]
+    Cancelled,
+
     #[error("The foreground application changed while reading the selection")]
     ForegroundChanged,
 
@@ -140,6 +146,7 @@ impl SelectionError {
             SelectionError::CopyTimeout => "copy_timeout",
             SelectionError::ClipboardSnapshotRefused(_) => "clipboard_snapshot_refused",
             SelectionError::ModifiersHeld => "modifiers_held",
+            SelectionError::Cancelled => "cancelled",
             SelectionError::ForegroundChanged => "foreground_changed",
             SelectionError::FocusIsSelf => "focus_is_self",
             SelectionError::NoForegroundApp => "no_foreground_app",
@@ -155,6 +162,17 @@ pub struct SelectionRequest {
     /// Compatibility mode: synthesize Cmd-C when the Accessibility path comes
     /// up empty. Subject to the fail-closed clipboard rules regardless.
     pub allow_clipboard_fallback: bool,
+    /// Session cancellation, polled during the slow parts of a read — waiting
+    /// for the hotkey modifiers to clear, waiting for the copy to land. A
+    /// closure rather than the TTS session token, so this module keeps not
+    /// knowing about the TTS subsystem. `None` (diagnostics) never cancels.
+    pub cancelled: Option<std::sync::Arc<dyn Fn() -> bool + Send + Sync>>,
+}
+
+impl SelectionRequest {
+    pub fn is_cancelled(&self) -> bool {
+        self.cancelled.as_ref().is_some_and(|check| check())
+    }
 }
 
 type Job = (SelectionRequest, SyncSender<SelectionReport>);
@@ -280,6 +298,7 @@ mod tests {
     fn error_codes_are_stable() {
         assert_eq!(SelectionError::NoSelection.code(), "no_selection");
         assert_eq!(SelectionError::SecureInput.code(), "secure_input");
+        assert_eq!(SelectionError::Cancelled.code(), "cancelled");
         assert_eq!(
             SelectionError::ClipboardSnapshotRefused("x".to_string()).code(),
             "clipboard_snapshot_refused"

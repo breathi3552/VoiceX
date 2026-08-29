@@ -20,7 +20,7 @@ use objc2::runtime::ProtocolObject;
 use objc2_app_kit::{NSPasteboard, NSPasteboardItem, NSPasteboardTypeString, NSPasteboardWriting};
 use objc2_foundation::{NSArray, NSData, NSString};
 
-use crate::selection::SelectionError;
+use crate::selection::{SelectionError, SelectionRequest};
 
 /// Physical keycodes for a layout-independent Command+C.
 const MACOS_COMMAND_KEYCODE: u16 = 55;
@@ -33,7 +33,13 @@ const COPY_POLL_INTERVAL_MS: u64 = 10;
 /// How long we wait for the user to let go of the hotkey before synthesizing a
 /// copy. Posting Cmd-C while Option is physically down delivers Option+Cmd+C to
 /// the target application, which is somebody else's shortcut.
-const MODIFIER_RELEASE_TIMEOUT_MS: u64 = 800;
+///
+/// Generous on purpose: lingering on the chord while waiting for the read to
+/// audibly start is entirely natural, and at 800 ms it was the main way a
+/// Safari read failed (`modifiers_held`). The HUD shows "preparing" for the
+/// whole wait, and the wait itself is cancellable, so a long ceiling costs
+/// nothing when the user lets go promptly.
+const MODIFIER_RELEASE_TIMEOUT_MS: u64 = 3_000;
 const MODIFIER_POLL_INTERVAL_MS: u64 = 10;
 
 /// Total snapshot budget. Beyond this we refuse rather than hold (and rewrite)
@@ -63,9 +69,15 @@ fn modifiers_held() -> bool {
     flags & MODIFIER_FLAG_MASK != 0
 }
 
-fn wait_for_modifier_release() -> Result<(), SelectionError> {
+fn wait_for_modifier_release(request: &SelectionRequest) -> Result<(), SelectionError> {
     let deadline = Instant::now() + Duration::from_millis(MODIFIER_RELEASE_TIMEOUT_MS);
     while modifiers_held() {
+        // Cancellation must win over the wait: this is where a stop hotkey or
+        // Escape lands while the user is still holding the chord, and a wait
+        // that cannot be interrupted would hold the session for seconds.
+        if request.is_cancelled() {
+            return Err(SelectionError::Cancelled);
+        }
         if Instant::now() >= deadline {
             return Err(SelectionError::ModifiersHeld);
         }
@@ -197,7 +209,7 @@ pub struct CopyReadOutcome {
 /// `expected` is the application the selection was read from; the copy is
 /// posted to whatever is frontmost *now*, so the caller's snapshot is
 /// re-verified immediately beforehand. Waiting for the modifiers to clear can
-/// take most of a second, which is ample time to switch windows, and posting
+/// take several seconds, which is ample time to switch windows, and posting
 /// Cmd-C into an app we never inspected could both read the wrong content and
 /// hit a control we never checked for secure input.
 ///
@@ -205,12 +217,12 @@ pub struct CopyReadOutcome {
 /// which is also what an empty selection looks like from here; the caller
 /// disambiguates using what the Accessibility layer already reported.
 pub fn read_via_copy(
-    app: &tauri::AppHandle,
+    request: &SelectionRequest,
     expected_pid: u32,
 ) -> Result<CopyReadOutcome, SelectionError> {
-    wait_for_modifier_release()?;
+    wait_for_modifier_release(request)?;
 
-    let current = crate::foreground_app::detect_foreground_app(app)
+    let current = crate::foreground_app::detect_foreground_app(&request.app)
         .map_err(|_| SelectionError::NoForegroundApp)?;
     if current.process_id != expected_pid {
         return Err(SelectionError::ForegroundChanged);
@@ -226,6 +238,11 @@ pub fn read_via_copy(
     loop {
         if pasteboard.changeCount() != change_count_before {
             break;
+        }
+        if request.is_cancelled() {
+            // The copy was already posted; nothing to undo — the pasteboard
+            // has not changed, so the user's clipboard is untouched.
+            return Err(SelectionError::Cancelled);
         }
         if Instant::now() >= deadline {
             // Nothing was written, so the user's clipboard is untouched.

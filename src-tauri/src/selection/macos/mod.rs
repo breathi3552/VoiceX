@@ -140,7 +140,7 @@ pub fn read_selection(
     }
 
     probe.used_clipboard_fallback = true;
-    let copied = match clipboard::read_via_copy(&request.app, app_pid) {
+    let copied = match clipboard::read_via_copy(request, app_pid) {
         Ok(copied) => copied,
         // A copy that changes nothing is indistinguishable from an empty
         // selection at the pasteboard level; trust the Accessibility layer when

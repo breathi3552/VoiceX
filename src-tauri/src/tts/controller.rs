@@ -596,6 +596,13 @@ impl TtsController {
                         .as_ref()
                         .map(|s| s.tts_clipboard_fallback)
                         .unwrap_or(true),
+                    // Lets the read's slow waits (modifier release, copy
+                    // landing) abort as soon as a stop or a superseding read
+                    // cancels this session, instead of holding it for seconds.
+                    cancelled: Some(std::sync::Arc::new({
+                        let token = token.clone();
+                        move || token.is_cancelled()
+                    })),
                 });
 
                 // The session stays claimed across the handoff to the backend,

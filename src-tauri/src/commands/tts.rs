@@ -158,6 +158,9 @@ pub async fn diagnose_selection(
         crate::selection::read_selection_reporting(crate::selection::SelectionRequest {
             app,
             allow_clipboard_fallback,
+            // The diagnostic read has no session to cancel it; it runs to
+            // completion or to its own timeouts.
+            cancelled: None,
         })
     })
     .await
