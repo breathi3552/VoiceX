@@ -412,7 +412,9 @@ fn run_playback(
     handle_slot: Arc<Mutex<Option<PlaybackHandle>>>,
     speaking: Arc<AtomicBool>,
 ) {
-    let playback = match Playback::open(device_rate, gain) {
+    // No prebuffer: MiMo has no speed parameter, so playback never outpaces
+    // synthesis the way fast speech does on the rate-capable providers.
+    let playback = match Playback::open(device_rate, gain, 0) {
         Ok(playback) => playback,
         Err(err) => {
             if token.finish() {
@@ -865,7 +867,8 @@ mod tests {
 
         let decode_token = token.clone();
         let player = thread::spawn(move || {
-            let playback = Playback::open(rate, 1.0).expect("failed to open the output device");
+            let playback =
+                Playback::open(rate, 1.0, 0).expect("failed to open the output device");
             let handle = playback.handle();
             // Sampled while audio is playing, because this drives the HUD
             // waveform and a level that only appears after the last sample

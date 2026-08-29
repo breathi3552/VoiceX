@@ -20,7 +20,7 @@ use futures_util::StreamExt;
 use serde::Serialize;
 
 use super::decode::{decode_mp3_stream, ChunkSource};
-use super::playback::{negotiate_sample_rate, Playback, PlaybackHandle};
+use super::playback::{negotiate_sample_rate, prebuffer_samples, Playback, PlaybackHandle};
 use super::{
     log_event, split_for_backend, CancelToken, TtsBackend, TtsError, TtsRequest, TtsStatus,
     TtsVoice,
@@ -209,6 +209,9 @@ impl VolcengineBackend {
         // for cloud providers (plan §5.4).
         let speech_rate = speech_rate_from_normalized(request.rate);
         let gain = request.volume.unwrap_or(1.0);
+        // The provider's -50..=100 scale is linear in the 0.5x-2x multiplier,
+        // so this recovers the multiplier the playback policy is written in.
+        let prebuffer = prebuffer_samples(1.0 + speech_rate as f32 / 100.0, sample_rate);
 
         let (tx, rx) = mpsc::channel::<Vec<u8>>();
         // Lets the decode side tell "the provider failed" apart from "the audio
@@ -237,6 +240,7 @@ impl VolcengineBackend {
                     source,
                     sample_rate,
                     gain,
+                    prebuffer,
                     decode_token,
                     decode_error,
                     playback_slot,
@@ -296,12 +300,13 @@ fn run_playback(
     source: ChunkSource,
     sample_rate: u32,
     gain: f32,
+    prebuffer: u64,
     token: CancelToken,
     network_error: Arc<Mutex<Option<String>>>,
     handle_slot: Arc<Mutex<Option<PlaybackHandle>>>,
     speaking: Arc<AtomicBool>,
 ) {
-    let playback = match Playback::open(sample_rate, gain) {
+    let playback = match Playback::open(sample_rate, gain, prebuffer) {
         Ok(playback) => playback,
         Err(err) => {
             if token.finish() {
@@ -575,7 +580,8 @@ mod tests {
 
         let decode_token = token.clone();
         let decoder = thread::spawn(move || {
-            let playback = Playback::open(rate, 1.0).expect("failed to open the output device");
+            let playback =
+                Playback::open(rate, 1.0, 0).expect("failed to open the output device");
             let handle = playback.handle();
             // Sampled while audio is actually playing, because this is what
             // drives the HUD waveform and a level that only appears after the

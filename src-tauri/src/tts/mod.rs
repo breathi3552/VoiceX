@@ -253,20 +253,29 @@ pub trait TtsBackend: Send + Sync {
 }
 
 /// Split `text` into pieces of at most `limit` characters, cutting at a
-/// sentence boundary where one lands near the edge.
+/// sentence boundary where one lands near the edge, or at a clause boundary
+/// when a whole window goes by without one.
 ///
 /// Cloud providers cap a single request, not a read: each backend issues one
 /// request per piece into the same decode pipeline, so a split point is
-/// audible only as the pause a human would take there anyway. Falls back to a
-/// hard cut when a window holds no boundary — a wall of text with no
-/// punctuation is exactly the case where hunting for one would leave the
-/// window nearly empty. Nothing is dropped: the pieces concatenate back to
-/// the input.
+/// audible only as the pause a human would take there anyway. The clause
+/// fallback exists for text like a patent claim — hundreds of characters of
+/// commas before the first full stop — where cutting at a 、 or ， is still a
+/// pause a reader would take, unlike the mid-word hard cut it replaces. The
+/// hard cut remains only for text with no punctuation at all. Nothing is
+/// dropped: the pieces concatenate back to the input.
 pub fn split_for_backend(text: &str, limit: usize) -> Vec<String> {
-    /// How far back to look for a sentence end. Everything here counts
+    /// How far back to look for a boundary. Everything here counts
     /// characters, never bytes — a byte-based window silently shrinks to a
     /// third of its intended size on Chinese text.
     const SENTENCE_LOOKBACK: usize = 200;
+
+    fn is_sentence_end(ch: char) -> bool {
+        matches!(ch, '。' | '！' | '？' | '.' | '!' | '?' | '\n')
+    }
+    fn is_clause_end(ch: char) -> bool {
+        matches!(ch, '，' | '、' | '；' | '：' | ',' | ';' | ':')
+    }
 
     let chars: Vec<char> = text.chars().collect();
     if limit == 0 || chars.len() <= limit {
@@ -283,7 +292,8 @@ pub fn split_for_backend(text: &str, limit: usize) -> Vec<String> {
         let lookback = limit.saturating_sub(SENTENCE_LOOKBACK);
         let cut = window[lookback..]
             .iter()
-            .rposition(|ch| matches!(ch, '。' | '！' | '？' | '.' | '!' | '?' | '\n'))
+            .rposition(|ch| is_sentence_end(*ch))
+            .or_else(|| window[lookback..].iter().rposition(|ch| is_clause_end(*ch)))
             .map(|offset| lookback + offset + 1)
             .unwrap_or(limit);
         pieces.push(window[..cut].iter().collect());
@@ -312,6 +322,26 @@ mod tests {
         assert_eq!(pieces[0], "第一句话。第二句话。");
         assert!(pieces.iter().all(|piece| piece.chars().count() <= 12));
         assert_eq!(pieces.concat(), text, "a split may pause, never drop");
+    }
+
+    #[test]
+    fn a_long_clause_run_is_cut_at_clause_punctuation_not_mid_word() {
+        // Patent-claim text: hundreds of characters of 、 and ， before the
+        // first full stop. A hard cut there lands mid-word; a clause cut is a
+        // pause a human reader would take anyway.
+        let text = "第一部分甲乙丙丁、第二部分戊己庚辛，第三部分壬癸子丑继续延伸";
+        let pieces = split_for_backend(text, 12);
+        assert_eq!(pieces[0], "第一部分甲乙丙丁、");
+        assert!(pieces.iter().all(|piece| piece.chars().count() <= 12));
+        assert_eq!(pieces.concat(), text);
+    }
+
+    #[test]
+    fn a_sentence_end_beats_a_later_clause_end() {
+        // The bigger pause wins even when a comma sits closer to the limit.
+        let text = "前一句话结束。之后是很长的、带着顿号的从句一直说下去说下去";
+        let pieces = split_for_backend(text, 20);
+        assert_eq!(pieces[0], "前一句话结束。");
     }
 
     #[test]

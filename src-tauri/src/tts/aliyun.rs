@@ -27,7 +27,9 @@ use futures_util::StreamExt;
 use serde_json::{json, Value};
 
 use super::decode::{decode_mp3_stream, ChunkSource};
-use super::playback::{negotiate_sample_rate_among, Playback, PlaybackHandle};
+use super::playback::{
+    negotiate_sample_rate_among, prebuffer_samples, Playback, PlaybackHandle,
+};
 use super::{
     log_event, split_for_backend, CancelToken, TtsBackend, TtsError, TtsRequest, TtsStatus,
     TtsVoice,
@@ -63,6 +65,18 @@ struct ModelSpec {
     sample_rates: &'static [u32],
     /// Longest text accepted in one request.
     max_chars: usize,
+    /// Longest text one request reliably *finishes*. Distinct from
+    /// `max_chars`, which is where the service starts rejecting: CosyVoice
+    /// accepts thousands of characters and then silently truncates the audio
+    /// at ~836 output tokens (~33 s at 1x) per internal batch, reporting
+    /// `finish_reason=stop` as if nothing happened. Batches are sentences
+    /// merged server-side to ~150 characters, so the only reliable control is
+    /// keeping the whole request under the budget. Measured 2026-08: a
+    /// 163-character single-sentence request lost its tail on every rate and
+    /// sample rate; 86 characters always completed; replacing clause commas
+    /// with full stops did not help because the server merges the sentences
+    /// straight back into one batch.
+    piece_chars: usize,
     voices: &'static [(&'static str, &'static str, &'static str)],
     /// Always called with this spec's own `id`, so the body cannot name a
     /// different model than the spec it belongs to — a copy-pasted entry that
@@ -155,6 +169,8 @@ const SPECS: [ModelSpec; 3] = [
         // ceiling does not exist. First audio does grow with length — 479 ms at
         // 500 characters, 1.9 s at 5000 — so this is the limit, not a target.
         max_chars: 5_000,
+        // Renders ~4x realtime and completed every long-text probe intact.
+        piece_chars: 5_000,
         voices: &QWEN3_VOICES,
         build_body: |model, s| {
             json!({
@@ -183,6 +199,9 @@ const SPECS: [ModelSpec; 3] = [
         // as 36000 and 15000 as 27000, both rejected; 10000 were accepted.
         // 9000 keeps a pure-CJK selection at 18000 units, short of the edge.
         max_chars: 9_000,
+        // Shares CosyVoice's engine but not its budget: the 163-character
+        // single-sentence probe came back complete, ~10x realtime.
+        piece_chars: 9_000,
         voices: &QWEN_AUDIO_VOICES,
         build_body: speech_synthesizer_body,
     },
@@ -196,6 +215,12 @@ const SPECS: [ModelSpec; 3] = [
         // Same 20000-unit cap as qwen-audio, with the same CJK-counts-double
         // rule: 15000 characters were rejected as 27000 units, 10000 accepted.
         max_chars: 9_000,
+        // The ~836-token batch budget (see `piece_chars` on the struct) bites
+        // at ~155 characters of dense prose, sooner for text that speaks
+        // slower — digits and heavy punctuation expand. 120 keeps ordinary
+        // text a comfortable margin inside it while cutting only once per
+        // ~half minute of speech.
+        piece_chars: 120,
         voices: &COSYVOICE_VOICES,
         build_body: speech_synthesizer_body,
     },
@@ -346,6 +371,11 @@ impl AliyunBackend {
         // settings page hides the row for cloud providers anyway.
         let speed = speed_from_normalized(request.rate);
         let gain = request.volume.unwrap_or(1.0);
+        // Fast speech drains audio quicker than CosyVoice synthesizes it (the
+        // service generates a constant characters-per-second regardless of the
+        // requested rate), so those reads trade a moment of startup latency
+        // for underruns that pause cleanly instead of crackling.
+        let prebuffer = prebuffer_samples(speed, sample_rate);
 
         let (tx, rx) = mpsc::channel::<Vec<u8>>();
         // Lets the decode side tell "the provider failed" apart from "the audio
@@ -374,6 +404,7 @@ impl AliyunBackend {
                     source,
                     sample_rate,
                     gain,
+                    prebuffer,
                     decode_token,
                     decode_error,
                     playback_slot,
@@ -388,9 +419,13 @@ impl AliyunBackend {
         let http_error = network_error;
         tauri::async_runtime::spawn(async move {
             // One request per piece, all feeding the same decoder: the service
-            // caps a request, not a read, and the pieces end on sentence
-            // boundaries, so a seam is audible only as an ordinary pause.
-            let pieces = split_for_backend(&text, spec.max_chars);
+            // caps a request, not a read, and the pieces end on sentence or
+            // clause boundaries, so a seam is audible only as an ordinary
+            // pause. `piece_chars` leads because CosyVoice's silent per-batch
+            // output budget bites thousands of characters before `max_chars`
+            // would get the request rejected outright; the `min` only guards
+            // a future spec whose two limits drift past each other.
+            let pieces = split_for_backend(&text, spec.piece_chars.min(spec.max_chars));
             if pieces.len() > 1 {
                 log_event("speak_chunked", &[("pieces", pieces.len().to_string())]);
             }
@@ -431,16 +466,18 @@ impl AliyunBackend {
 
 /// Decode and play, on a thread of its own because both block and because the
 /// output stream may not cross threads.
+#[allow(clippy::too_many_arguments)]
 fn run_playback(
     source: ChunkSource,
     sample_rate: u32,
     gain: f32,
+    prebuffer: u64,
     token: CancelToken,
     network_error: Arc<Mutex<Option<String>>>,
     handle_slot: Arc<Mutex<Option<PlaybackHandle>>>,
     speaking: Arc<AtomicBool>,
 ) {
-    let playback = match Playback::open(sample_rate, gain) {
+    let playback = match Playback::open(sample_rate, gain, prebuffer) {
         Ok(playback) => playback,
         Err(err) => {
             if token.finish() {
@@ -827,6 +864,29 @@ mod tests {
     }
 
     #[test]
+    fn only_cosyvoice_needs_the_short_piece_limit() {
+        // The ~836-token batch budget was reproduced only on cosyvoice-v3-flash
+        // (2026-08): the same 163-character single-sentence text came back
+        // complete from qwen3-tts-flash and qwen-audio-3.0-tts-flash. Capping
+        // the others would only multiply requests and seams for nothing —
+        // and a cosyvoice limit above ~150 would reintroduce silently
+        // truncated tails.
+        assert!(
+            spec_for(MODEL_COSYVOICE).piece_chars <= 150,
+            "cosyvoice pieces must stay inside the silent output budget"
+        );
+        assert_eq!(spec_for(MODEL_QWEN3).piece_chars, 5_000);
+        assert_eq!(spec_for(MODEL_QWEN_AUDIO).piece_chars, 9_000);
+        for spec in &SPECS {
+            assert!(
+                spec.piece_chars <= spec.max_chars,
+                "{}: a piece the service rejects outright is never right",
+                spec.id
+            );
+        }
+    }
+
+    #[test]
     fn a_refused_start_hands_the_session_back() {
         // Without this the session stays claimed forever: the read hotkey turns
         // into a permanent "stop", and the HUD sits on "preparing" with nothing
@@ -875,7 +935,8 @@ mod tests {
 
             let decode_token = token.clone();
             let decoder = thread::spawn(move || {
-                let playback = Playback::open(rate, 1.0).expect("failed to open the output device");
+                let playback =
+                    Playback::open(rate, 1.0, 0).expect("failed to open the output device");
                 let handle = playback.handle();
                 // Sampled while audio is playing, because this drives the HUD
                 // waveform and a level that only appears after the last sample

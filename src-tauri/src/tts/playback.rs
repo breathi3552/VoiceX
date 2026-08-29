@@ -48,6 +48,33 @@ const POLL_INTERVAL: Duration = Duration::from_millis(20);
 /// Weight of the newest measurement; the rest carries over from the last one.
 const LEVEL_SMOOTHING: f32 = 0.35;
 
+/// Audio to accumulate before starting, and before resuming after an underrun,
+/// when the utterance plays faster than the provider synthesizes it.
+///
+/// Measured on CosyVoice (2026-08): the service generates a constant characters
+/// per second regardless of the requested speech rate, so at 2x the audio drains
+/// almost exactly as fast as it arrives. Without hysteresis every network gap
+/// becomes its own crackle — machine-gun stutter. With it, a starved stream
+/// pauses cleanly and resumes with two seconds in hand.
+const PREBUFFER_SECONDS: f32 = 2.0;
+
+/// Speech-rate multiplier above which the hysteresis buffer engages. Below it
+/// synthesis outpaces playback comfortably and buffering would only delay the
+/// first audible word — which plan §5.4 measured as the feature's whole point.
+const PREBUFFER_SPEED_THRESHOLD: f32 = 1.25;
+
+/// The hysteresis buffer for `speed`, in mono samples; 0 disables gating.
+///
+/// Callers hand this to [`Playback::open`]. It is a function of the speech-rate
+/// multiplier, not the provider, so every cloud backend applies one policy.
+pub fn prebuffer_samples(speed: f32, sample_rate: u32) -> u64 {
+    if speed > PREBUFFER_SPEED_THRESHOLD {
+        (PREBUFFER_SECONDS * sample_rate as f32) as u64
+    } else {
+        0
+    }
+}
+
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum PlaybackError {
     #[error("No audio output device is available")]
@@ -142,6 +169,12 @@ struct PlaybackShared {
     /// Set by cpal's error callback; turns an otherwise silent device failure
     /// into a reported error instead of a wait that never ends.
     failed: AtomicBool,
+    /// Samples that must be waiting before a gated stream (re)opens. Zero
+    /// disables gating entirely, which is the slow-speech case.
+    gate_resume: AtomicU64,
+    /// While set, the callback plays silence without consuming, letting the
+    /// buffer refill after an underrun instead of crackling chunk by chunk.
+    gated: AtomicBool,
     /// Smoothed output level, as `f32` bits, for the HUD waveform. Measured
     /// from the samples the callback is already walking, so it costs nothing
     /// extra and is a real level rather than an animation pretending to be one.
@@ -195,8 +228,14 @@ pub struct Playback {
 impl Playback {
     /// Open the default output device at `sample_rate`.
     ///
+    /// `prebuffer` is the hysteresis threshold from [`prebuffer_samples`]:
+    /// with a non-zero value the stream holds silence until that much audio is
+    /// waiting — both at the start and again after any underrun — so a supply
+    /// that barely keeps up produces a rare clean pause instead of a crackle
+    /// per network chunk. Zero keeps the start-immediately behaviour.
+    ///
     /// Must be called from the thread that will feed and drop it.
-    pub fn open(sample_rate: u32, gain: f32) -> Result<Self, PlaybackError> {
+    pub fn open(sample_rate: u32, gain: f32, prebuffer: u64) -> Result<Self, PlaybackError> {
         let device = cpal::default_host()
             .default_output_device()
             .ok_or(PlaybackError::NoDevice)?;
@@ -215,6 +254,10 @@ impl Playback {
         shared
             .gain
             .store(gain.clamp(0.0, 1.0).to_bits(), Ordering::Relaxed);
+        shared.gate_resume.store(prebuffer, Ordering::Relaxed);
+        // Gated from the first callback, so the opening words also start with
+        // a full buffer in hand rather than a syllable followed by a stall.
+        shared.gated.store(prebuffer > 0, Ordering::Relaxed);
 
         let error_shared = shared.clone();
         let on_error = move |err| {
@@ -323,6 +366,11 @@ impl Playback {
             if played != last_played {
                 last_played = played;
                 last_progress = Instant::now();
+            } else if self.shared.gated.load(Ordering::Relaxed) {
+                // A gated stream is deliberately not consuming while the
+                // buffer refills; that is a wait on the network, not a wedged
+                // device, however long the provider takes.
+                last_progress = Instant::now();
             } else if played < pushed && last_progress.elapsed() > STALL_TIMEOUT {
                 // Samples are waiting but the device is not taking them.
                 return Err(PlaybackError::Stalled);
@@ -361,6 +409,17 @@ fn fill<T, W>(
         return;
     }
 
+    let gate_resume = shared.gate_resume.load(Ordering::Relaxed);
+    if gate_resume > 0 && shared.gated.load(Ordering::Relaxed) {
+        // A finished stream has nothing more to wait for: drain what is left.
+        if shared.ended.load(Ordering::SeqCst) || local.len() as u64 >= gate_resume {
+            shared.gated.store(false, Ordering::Relaxed);
+        } else {
+            out.fill(T::default());
+            return;
+        }
+    }
+
     let gain = f32::from_bits(shared.gain.load(Ordering::Relaxed));
     let mut written = 0u64;
     let mut squares = 0f32;
@@ -382,6 +441,17 @@ fn fill<T, W>(
     }
 
     shared.played.fetch_add(written, Ordering::SeqCst);
+
+    // Ran dry mid-stream: close the gate so the buffer refills to the
+    // threshold before another sample plays. Doing it only on a true underrun
+    // keeps a stream that ends exactly on a callback boundary gate-free.
+    if gate_resume > 0
+        && local.is_empty()
+        && (written as usize) < out.len() / channels.max(1)
+        && !shared.ended.load(Ordering::SeqCst)
+    {
+        shared.gated.store(true, Ordering::Relaxed);
+    }
 
     if written > 0 {
         // RMS of the normalized waveform, which is exactly what the microphone
@@ -520,6 +590,93 @@ mod tests {
             quiet < loud,
             "silence must decay the level: {quiet} vs {loud}"
         );
+    }
+
+    fn gated_shared(threshold: u64) -> Arc<PlaybackShared> {
+        let shared = Arc::new(PlaybackShared::default());
+        shared.gain.store(1.0f32.to_bits(), Ordering::Relaxed);
+        shared.gate_resume.store(threshold, Ordering::Relaxed);
+        shared.gated.store(true, Ordering::Relaxed);
+        shared
+    }
+
+    fn push(shared: &Arc<PlaybackShared>, samples: &[f32]) {
+        shared.staging.lock().unwrap().extend_from_slice(samples);
+        shared
+            .pushed
+            .fetch_add(samples.len() as u64, Ordering::SeqCst);
+    }
+
+    #[test]
+    fn a_gated_stream_holds_silence_until_the_buffer_reaches_the_threshold() {
+        // Fast speech drains faster than the provider synthesizes; opening the
+        // stream on the first sample would play a syllable and then stall.
+        let shared = gated_shared(4);
+        let mut local = VecDeque::new();
+
+        push(&shared, &[0.5, 0.5]);
+        let out = drain_into::<f32>(&shared, &mut local, 2, 1);
+        assert_eq!(out, vec![0.0, 0.0], "below threshold must stay silent");
+        assert_eq!(shared.played.load(Ordering::SeqCst), 0);
+
+        push(&shared, &[0.5, 0.5]);
+        let out = drain_into::<f32>(&shared, &mut local, 2, 1);
+        assert_eq!(out, vec![0.5, 0.5], "the threshold opens the gate");
+    }
+
+    #[test]
+    fn an_underrun_recloses_the_gate_until_the_buffer_refills() {
+        // The whole point of the hysteresis: one clean pause instead of a
+        // crackle for every late network chunk.
+        let shared = gated_shared(3);
+        let mut local = VecDeque::new();
+
+        push(&shared, &[1.0, 1.0, 1.0]);
+        drain_into::<f32>(&shared, &mut local, 4, 1); // drains dry: underrun
+        assert!(shared.gated.load(Ordering::Relaxed), "underrun must re-gate");
+
+        push(&shared, &[1.0]);
+        let out = drain_into::<f32>(&shared, &mut local, 1, 1);
+        assert_eq!(out, vec![0.0], "a partial refill stays gated");
+
+        push(&shared, &[1.0, 1.0]);
+        let out = drain_into::<f32>(&shared, &mut local, 3, 1);
+        assert_eq!(out, vec![1.0, 1.0, 1.0], "a full refill resumes");
+    }
+
+    #[test]
+    fn the_end_of_the_stream_opens_the_gate_regardless_of_the_buffer() {
+        // A short utterance may never reach the threshold; the tail must play.
+        let shared = gated_shared(1_000);
+        let mut local = VecDeque::new();
+
+        push(&shared, &[0.7]);
+        assert_eq!(
+            drain_into::<f32>(&shared, &mut local, 1, 1),
+            vec![0.0],
+            "still gated while the stream may yet refill"
+        );
+
+        shared.ended.store(true, Ordering::SeqCst);
+        assert_eq!(
+            drain_into::<f32>(&shared, &mut local, 1, 1),
+            vec![0.7],
+            "nothing more is coming, so what is buffered plays out"
+        );
+        assert!(
+            !shared.gated.load(Ordering::Relaxed),
+            "a finished stream must not re-gate on its final underrun"
+        );
+    }
+
+    #[test]
+    fn slow_speech_gets_no_buffer_and_fast_speech_gets_one() {
+        // At 1x the provider outpaces playback and the buffer would only delay
+        // the first word; above the threshold the deficit is real.
+        assert_eq!(prebuffer_samples(1.0, 48_000), 0);
+        assert_eq!(prebuffer_samples(1.25, 48_000), 0, "threshold is exclusive");
+        assert_eq!(prebuffer_samples(1.5, 48_000), 96_000);
+        assert_eq!(prebuffer_samples(2.0, 24_000), 48_000);
     }
 
     #[test]
