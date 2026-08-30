@@ -16,7 +16,7 @@ use crate::session::SessionMessage;
 
 impl SessionController {
     pub fn handle_asr_event_state(&self, state: &mut AppState, evt: AsrEvent) {
-        if state.ptt_release_committed {
+        if crate::ptt_commit::should_ignore_asr_after_release(state.ptt_release_committed) {
             log::debug!(
                 "Dropping ASR {} after PTT release commit",
                 if evt.is_final { "final" } else { "partial" }
@@ -164,7 +164,7 @@ impl SessionController {
     }
 
     pub fn on_asr_stream_finished_state(&self, state: &mut AppState) {
-        if state.ptt_release_committed {
+        if crate::ptt_commit::should_ignore_asr_after_release(state.ptt_release_committed) {
             log::debug!("Dropping ASR stream-finished after PTT release commit");
             return;
         }
@@ -200,7 +200,7 @@ impl SessionController {
     }
 
     pub fn on_asr_stream_failed_state(&self, state: &mut AppState, failure: AsrFailure) {
-        if state.ptt_release_committed {
+        if crate::ptt_commit::should_ignore_asr_after_release(state.ptt_release_committed) {
             log::debug!("Dropping ASR stream failure after PTT release commit");
             return;
         }

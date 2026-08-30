@@ -12,6 +12,7 @@ pub mod i18n;
 pub mod injector;
 pub mod llm;
 pub mod network_proxy;
+pub mod ptt_commit;
 pub mod selection;
 pub mod services;
 pub mod session;

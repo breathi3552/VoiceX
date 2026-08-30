@@ -360,28 +360,30 @@ impl AppState {
     /// transcript becomes the committed text. An empty snapshot means there is
     /// nothing to inject, so the normal completion path remains in control.
     pub(crate) fn commit_push_to_talk_release(&mut self) -> bool {
-        if self.session_state != HotkeySessionState::Finalizing
-            || self.recording_style != Some(RecordingStyle::PushToTalk)
+        let mode = if self.session_state == HotkeySessionState::Finalizing
+            && self.recording_style == Some(RecordingStyle::PushToTalk)
         {
-            return false;
-        }
-
-        let has_usable_final = self.has_final_result && !self.session_final_text.trim().is_empty();
-        let commit_text = if has_usable_final {
-            self.session_final_text.clone()
+            crate::ptt_commit::ReleaseMode::PushToTalk
         } else {
-            self.transcript_text.clone()
+            crate::ptt_commit::ReleaseMode::Other
         };
 
-        if commit_text.trim().is_empty() {
+        let Some(decision) = crate::ptt_commit::select_release_commit(
+            mode,
+            self.has_final_result,
+            &self.session_final_text,
+            &self.transcript_text,
+        ) else {
             self.ptt_release_committed = false;
             return false;
-        }
+        };
 
-        if !has_usable_final {
-            self.session_final_text = commit_text;
+        if decision.promoted_interim {
+            self.session_final_text = decision.text;
             self.has_final_result = true;
             self.final_version = self.final_version.saturating_add(1);
+        } else {
+            self.session_final_text = decision.text;
         }
 
         self.transcript_text = self.session_final_text.clone();
