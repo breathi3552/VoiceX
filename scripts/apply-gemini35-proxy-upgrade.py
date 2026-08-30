@@ -2,6 +2,7 @@
 from pathlib import Path
 import re
 
+# Migration revision 3: TokioIo gRPC proxy connector + deduplicated Cargo deps.
 ROOT = Path(__file__).resolve().parents[1]
 
 
