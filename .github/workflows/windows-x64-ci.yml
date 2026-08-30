@@ -1,0 +1,90 @@
+name: windows-x64-ci
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - scripts/apply-gemini35-proxy-upgrade.py
+      - .github/workflows/windows-x64-ci.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows-x64:
+    runs-on: windows-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Apply Gemini 3.5 and proxy source migration
+        shell: pwsh
+        run: python scripts/apply-gemini35-proxy-upgrade.py
+
+      - name: Commit generated source changes
+        shell: bash
+        run: |
+          git diff --check
+          if ! git diff --quiet; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add src src-tauri
+            git commit -m "feat: wire Gemini 3.5 transcription and proxy transport"
+            git push origin HEAD:main
+          fi
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Enable pnpm
+        shell: pwsh
+        run: |
+          corepack enable
+          corepack prepare pnpm@9 --activate
+
+      - name: Install Rust stable x64 MSVC
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Prepare CMake wrapper
+        shell: pwsh
+        run: |
+          $cmake = (Get-Command cmake -ErrorAction Stop).Source
+          $wrapper = Join-Path $PWD 'cmake-wrap.cmd'
+          @"
+          @echo off
+          setlocal
+          echo %* | findstr /C:"--build" >nul
+          if %errorlevel%==0 (
+            "$cmake" %*
+          ) else (
+            "$cmake" -DCMAKE_POLICY_VERSION_MINIMUM=3.5 %*
+          )
+          "@ | Set-Content -Path $wrapper -Encoding ASCII
+          "CMAKE=$wrapper" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Rust tests
+        working-directory: src-tauri
+        run: cargo test --target x86_64-pc-windows-msvc --locked
+
+      - name: Build Windows x64 bundles
+        run: pnpm tauri build --target x86_64-pc-windows-msvc
+
+      - name: Upload Windows x64 installers
+        uses: actions/upload-artifact@v4
+        with:
+          name: VoiceX-windows-x64
+          path: |
+            src-tauri/target/x86_64-pc-windows-msvc/release/bundle/msi/*.msi
+            src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*.exe
+          if-no-files-found: error
+          retention-days: 14
