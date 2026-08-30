@@ -111,6 +111,7 @@ pub struct AppState {
     pub(crate) text_injection_overrides: Vec<TextInjectionAppOverride>,
     pub(crate) has_final_result: bool,
     pub(crate) final_injected: bool,
+    pub(crate) ptt_release_committed: bool,
     pub(crate) last_injected_text: String,
     pub(crate) final_version: u64,
     pub(crate) injection_in_progress: bool,
@@ -171,6 +172,7 @@ impl AppState {
             text_injection_overrides: Vec::new(),
             has_final_result: false,
             final_injected: false,
+            ptt_release_committed: false,
             last_injected_text: String::new(),
             final_version: 0,
             injection_in_progress: false,
@@ -231,6 +233,7 @@ impl AppState {
                 self.session_target_app = None;
                 self.max_recording_countdown = None;
                 self.final_injected = false;
+                self.ptt_release_committed = false;
                 self.has_final_result = false;
                 self.last_injected_text.clear();
                 self.double_tap_upgrade_deadline = None;
@@ -351,6 +354,50 @@ impl AppState {
         // TODO: Stop recording
     }
 
+    /// Lock the text that a push-to-talk release explicitly commits.
+    ///
+    /// A real ASR final wins. If no final exists yet, the latest HUD/interim
+    /// transcript becomes the committed text. An empty snapshot means there is
+    /// nothing to inject, so the normal completion path remains in control.
+    pub(crate) fn commit_push_to_talk_release(&mut self) -> bool {
+        if self.session_state != HotkeySessionState::Finalizing
+            || self.recording_style != Some(RecordingStyle::PushToTalk)
+        {
+            return false;
+        }
+
+        let has_usable_final = self.has_final_result && !self.session_final_text.trim().is_empty();
+        let commit_text = if has_usable_final {
+            self.session_final_text.clone()
+        } else {
+            self.transcript_text.clone()
+        };
+
+        if commit_text.trim().is_empty() {
+            self.ptt_release_committed = false;
+            return false;
+        }
+
+        if !has_usable_final {
+            self.session_final_text = commit_text;
+            self.has_final_result = true;
+            self.final_version = self.final_version.saturating_add(1);
+        }
+
+        self.transcript_text = self.session_final_text.clone();
+        self.last_injected_text = self.session_final_text.clone();
+        self.ptt_release_committed = true;
+
+        // Release is the terminal recognition boundary for this PTT session.
+        // This deliberately bypasses stream-finished/final-timeout/refinement
+        // gates; the controller also cancels the live ASR transport.
+        self.asr_stream_finished = true;
+        self.asr_reconnect_in_progress = false;
+        self.asr_refinement_in_progress = false;
+        self.asr_refinement_done = true;
+        true
+    }
+
     fn should_upgrade_to_translate(&self, now: Instant) -> bool {
         if !self.can_open_double_tap_window() {
             return false;
@@ -396,6 +443,7 @@ impl AppState {
         self.did_receive_audio = false;
         self.max_recording_countdown = None;
         self.final_injected = false;
+        self.ptt_release_committed = false;
         self.has_final_result = false;
         self.last_injected_text.clear();
         self.final_version = 0;

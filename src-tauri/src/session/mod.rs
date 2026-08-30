@@ -1309,6 +1309,21 @@ impl SessionController {
             return;
         }
 
+        // PTT release already selected the final commit snapshot. AudioStopped
+        // is the local capture-close acknowledgement, not an ASR completion
+        // gate: inject now without waiting for WebSocket/stream-finished/final
+        // timeout or post-recording refinement. The audio metadata above is
+        // populated first so history persistence remains intact.
+        if state.ptt_release_committed {
+            log::info!(
+                "PTT release commit ready after audio stop; injecting immediately (len={})",
+                state.session_final_text.chars().count()
+            );
+            self.cancel_asr_final_timeout();
+            self.maybe_inject_final_state(state);
+            return;
+        }
+
         if let Some(ms) = duration_ms {
             if ms < MIN_RECORDING_MS {
                 log::info!(

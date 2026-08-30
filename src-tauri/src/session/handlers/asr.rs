@@ -16,6 +16,13 @@ use crate::session::SessionMessage;
 
 impl SessionController {
     pub fn handle_asr_event_state(&self, state: &mut AppState, evt: AsrEvent) {
+        if state.ptt_release_committed {
+            log::debug!(
+                "Dropping ASR {} after PTT release commit",
+                if evt.is_final { "final" } else { "partial" }
+            );
+            return;
+        }
         if !state.asr_received_event {
             state.asr_received_event = true;
         }
@@ -157,6 +164,10 @@ impl SessionController {
     }
 
     pub fn on_asr_stream_finished_state(&self, state: &mut AppState) {
+        if state.ptt_release_committed {
+            log::debug!("Dropping ASR stream-finished after PTT release commit");
+            return;
+        }
         // ASR stream completion is not the same as microphone capture stopping.
         // Keep the recording flag owned by the hotkey/audio stop path so we do not
         // accidentally skip a required stop_capture() after a reconnect/close race.
@@ -189,6 +200,10 @@ impl SessionController {
     }
 
     pub fn on_asr_stream_failed_state(&self, state: &mut AppState, failure: AsrFailure) {
+        if state.ptt_release_committed {
+            log::debug!("Dropping ASR stream failure after PTT release commit");
+            return;
+        }
         log::warn!(
             "ASR stream failed: provider={} phase={} kind={} retryable={} message={}",
             failure.provider.display_name(),
@@ -1718,3 +1733,39 @@ mod tests {
         assert!(analysis.peak_rms > 0.008);
     }
 }
+
+#[cfg(test)]
+mod ptt_late_final_tests {
+    use super::*;
+    use std::time::Instant;
+
+    #[test]
+    fn late_final_after_ptt_release_commit_is_ignored() {
+        let controller = SessionController::default();
+        let mut state = AppState::new();
+        let now = Instant::now();
+        state.handle_hotkey_pressed_at(now);
+        state.on_hold_threshold_reached();
+        state.transcript_text = "release snapshot".to_string();
+        state.handle_hotkey_released_at(now + std::time::Duration::from_millis(1_200));
+        assert!(state.commit_push_to_talk_release());
+        let committed_version = state.final_version;
+
+        controller.handle_asr_event_state(
+            &mut state,
+            AsrEvent {
+                text: "late provider final".to_string(),
+                is_final: true,
+                prefetch: false,
+                definite: true,
+                confidence: None,
+            },
+        );
+
+        assert_eq!(state.session_final_text, "release snapshot");
+        assert_eq!(state.transcript_text, "release snapshot");
+        assert_eq!(state.final_version, committed_version);
+        assert!(state.ptt_release_committed);
+    }
+}
+

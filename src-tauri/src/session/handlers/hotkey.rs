@@ -89,15 +89,38 @@ impl SessionController {
         self.cancel_hold_timer();
 
         let was_recording = state.is_recording;
+        let was_push_to_talk = state.session_state == HotkeySessionState::PushToTalk;
         state.handle_hotkey_released();
 
-        let mut schedule_finalize = false;
-        if state.session_state == HotkeySessionState::Finalizing {
-            schedule_finalize = true;
+        // A PTT key-up is an explicit commit boundary. Freeze the best text we
+        // already have before stopping capture so late provider events cannot
+        // replace it. Hands-free never enters this branch.
+        let ptt_release_committed =
+            was_push_to_talk && state.commit_push_to_talk_release();
+        if ptt_release_committed {
+            self.emit_transcript(&state.session_final_text, true);
+            self.cancel_asr_final_timeout();
+            log::info!(
+                "PTT release commit locked (len={}, had_provider_final={})",
+                state.session_final_text.chars().count(),
+                state.final_version > 0
+            );
         }
 
+        let schedule_finalize = state.session_state == HotkeySessionState::Finalizing;
+
         if was_recording && !state.is_recording {
+            // Closing the local capture is still required so audio/history are
+            // finalized, but injection no longer waits for the remote stream.
             self.stop_audio_capture("hotkey_release");
+        }
+
+        if ptt_release_committed {
+            // We already own the commit snapshot. Cancel the provider transport
+            // immediately; any already-queued ASR messages are ignored by the
+            // PTT commit guards in the ASR handler.
+            self.abort_asr_task();
+            self.stop_asr_audio_bridge();
         }
 
         if schedule_finalize {
@@ -116,3 +139,87 @@ impl SessionController {
         self.emit_state_from(state);
     }
 }
+
+#[cfg(test)]
+mod ptt_fast_commit_tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    fn enter_ptt(state: &mut AppState, now: Instant) {
+        state.handle_hotkey_pressed_at(now);
+        state.on_hold_threshold_reached();
+        assert_eq!(state.session_state, HotkeySessionState::PushToTalk);
+    }
+
+    #[test]
+    fn ptt_release_commits_existing_final_immediately() {
+        let controller = SessionController::default();
+        let mut state = AppState::new();
+        let now = Instant::now();
+        enter_ptt(&mut state, now);
+        state.session_final_text = "provider final".to_string();
+        state.transcript_text = "newer interim must not win".to_string();
+        state.has_final_result = true;
+        state.final_version = 1;
+
+        controller.on_hotkey_released(&mut state);
+
+        assert_eq!(state.session_state, HotkeySessionState::Finalizing);
+        assert!(state.ptt_release_committed);
+        assert!(state.asr_stream_finished);
+        assert_eq!(state.session_final_text, "provider final");
+        assert_eq!(state.transcript_text, "provider final");
+    }
+
+    #[test]
+    fn ptt_release_uses_interim_as_commit_fallback() {
+        let controller = SessionController::default();
+        let mut state = AppState::new();
+        let now = Instant::now();
+        enter_ptt(&mut state, now);
+        state.transcript_text = "latest HUD interim".to_string();
+
+        controller.on_hotkey_released(&mut state);
+
+        assert!(state.ptt_release_committed);
+        assert!(state.has_final_result);
+        assert_eq!(state.session_final_text, "latest HUD interim");
+        assert_eq!(state.final_version, 1);
+    }
+
+    #[test]
+    fn ptt_release_with_no_text_does_not_commit_empty_content() {
+        let controller = SessionController::default();
+        let mut state = AppState::new();
+        let now = Instant::now();
+        enter_ptt(&mut state, now);
+        state.transcript_text = "   ".to_string();
+
+        controller.on_hotkey_released(&mut state);
+
+        assert_eq!(state.session_state, HotkeySessionState::Finalizing);
+        assert!(!state.ptt_release_committed);
+        assert!(!state.has_final_result);
+        assert!(state.session_final_text.is_empty());
+    }
+
+    #[test]
+    fn hands_free_stop_does_not_enable_ptt_release_commit() {
+        let controller = SessionController::default();
+        let mut state = AppState::new();
+        state.translation_enabled = false;
+        let now = Instant::now();
+        state.handle_hotkey_pressed_at(now);
+        state.handle_hotkey_released_at(now + Duration::from_millis(80));
+        assert_eq!(state.session_state, HotkeySessionState::HandsFree);
+        state.transcript_text = "hands free text".to_string();
+        state.handle_hotkey_pressed_at(now + Duration::from_millis(600));
+
+        controller.on_hotkey_released(&mut state);
+
+        assert_eq!(state.session_state, HotkeySessionState::Finalizing);
+        assert!(!state.ptt_release_committed);
+        assert!(!state.asr_stream_finished);
+    }
+}
+
