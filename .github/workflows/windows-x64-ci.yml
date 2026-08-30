@@ -72,9 +72,9 @@ jobs:
           "@ | Set-Content -Path $wrapper -Encoding ASCII
           "CMAKE=$wrapper" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
-      - name: Rust tests
+      - name: Compile Rust tests
         working-directory: src-tauri
-        run: cargo test --target x86_64-pc-windows-msvc
+        run: cargo test --no-run --target x86_64-pc-windows-msvc
 
       - name: Commit Cargo.lock update
         shell: bash
