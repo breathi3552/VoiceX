@@ -22,8 +22,8 @@ use serde::Serialize;
 use super::decode::{decode_mp3_stream, ChunkSource};
 use super::playback::{negotiate_sample_rate, prebuffer_samples, Playback, PlaybackHandle};
 use super::{
-    log_event, split_for_backend, CancelToken, TtsBackend, TtsError, TtsRequest, TtsStatus,
-    TtsVoice,
+    cloud_http_client, log_cloud_retry, log_event, split_for_backend, CancelToken,
+    CloudStreamError, TtsBackend, TtsError, TtsRequest, TtsStatus, TtsVoice,
 };
 
 const ENDPOINT: &str = "https://openspeech.bytedance.com/api/v3/tts/unidirectional";
@@ -262,7 +262,7 @@ impl VolcengineBackend {
                 log_event("speak_chunked", &[("pieces", pieces.len().to_string())]);
             }
             for piece in &pieces {
-                let outcome = stream_audio(
+                let outcome = stream_audio_with_retry(
                     &config,
                     piece,
                     &speaker,
@@ -388,7 +388,7 @@ fn run_playback(
 /// one; `Ok(false)` means the read was cancelled or the decoder hung up, so
 /// further pieces would only bill text nobody hears.
 #[allow(clippy::too_many_arguments)]
-async fn stream_audio(
+async fn stream_audio_with_retry(
     config: &VolcengineConfig,
     text: &str,
     speaker: &str,
@@ -397,6 +397,49 @@ async fn stream_audio(
     tx: &Sender<Vec<u8>>,
     token: &CancelToken,
 ) -> Result<bool, String> {
+    let mut retries_done = 0;
+    loop {
+        match stream_audio(
+            config,
+            text,
+            speaker,
+            sample_rate,
+            speech_rate,
+            tx,
+            token,
+        )
+        .await
+        {
+            Ok(outcome) => return Ok(outcome),
+            Err(err) => {
+                if token.is_cancelled() {
+                    return Ok(false);
+                }
+                if let Some(delay_ms) = err.retry_delay_ms(retries_done) {
+                    log_cloud_retry("volcengine", retries_done, delay_ms, err.reason());
+                    tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+                    if token.is_cancelled() {
+                        return Ok(false);
+                    }
+                    retries_done += 1;
+                    continue;
+                }
+                return Err(err.into_detail());
+            }
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn stream_audio(
+    config: &VolcengineConfig,
+    text: &str,
+    speaker: &str,
+    sample_rate: u32,
+    speech_rate: i32,
+    tx: &Sender<Vec<u8>>,
+    token: &CancelToken,
+) -> Result<bool, CloudStreamError> {
     let body = RequestBody {
         user: User { uid: "voicex" },
         req_params: ReqParams {
@@ -411,7 +454,7 @@ async fn stream_audio(
         },
     };
 
-    let response = reqwest::Client::new()
+    let response = cloud_http_client()?
         .post(ENDPOINT)
         .header("X-Api-Key", &config.api_key)
         .header("X-Api-Resource-Id", &config.resource_id)
@@ -419,39 +462,47 @@ async fn stream_audio(
         .json(&body)
         .send()
         .await
-        .map_err(|err| format!("request failed: {err}"))?;
+        .map_err(CloudStreamError::request)?;
 
     let status = response.status();
     if !status.is_success() {
         let detail = response.text().await.unwrap_or_default();
-        return Err(format!("HTTP {status}: {}", first_line(&detail)));
+        return Err(CloudStreamError::http(status, first_line(&detail)));
     }
 
     let mut stream = response.bytes_stream();
     let mut pending = Vec::<u8>::new();
+    let mut audio_emitted = false;
 
     while let Some(chunk) = stream.next().await {
         if token.is_cancelled() {
             return Ok(false);
         }
-        let chunk = chunk.map_err(|err| format!("stream broke: {err}"))?;
+        let chunk = chunk.map_err(|err| CloudStreamError::stream(err, audio_emitted))?;
         pending.extend_from_slice(&chunk);
 
         // The response is newline-delimited JSON; a chunk may split a line.
         while let Some(newline) = pending.iter().position(|byte| *byte == b'\n') {
             let line: Vec<u8> = pending.drain(..=newline).collect();
-            if let Some(audio) = parse_line(&line[..line.len() - 1])? {
+            let audio = parse_line(&line[..line.len() - 1])
+                .map_err(|err| CloudStreamError::response(err, audio_emitted))?;
+            if let Some(audio) = audio {
                 if tx.send(audio).is_err() {
                     // The decoder is gone; nothing left to stream into.
                     return Ok(false);
                 }
+                audio_emitted = true;
             }
         }
     }
 
     if !pending.is_empty() {
-        if let Some(audio) = parse_line(&pending)? {
-            let _ = tx.send(audio);
+        let audio = parse_line(&pending)
+            .map_err(|err| CloudStreamError::response(err, audio_emitted))?;
+        if let Some(audio) = audio {
+            if tx.send(audio).is_err() {
+                return Ok(false);
+            }
         }
     }
 

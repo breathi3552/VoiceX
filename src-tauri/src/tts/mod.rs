@@ -22,6 +22,7 @@ pub mod volcengine;
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 pub use controller::TtsController;
 
@@ -197,6 +198,137 @@ impl TtsError {
     }
 }
 
+/// A cloud response may be attempted three times in total. The short first
+/// delay hides a one-off connection reset; the longer second delay gives a
+/// briefly overloaded gateway time to recover while keeping the audible gap
+/// bounded to 1.3 seconds plus connection establishment.
+const CLOUD_RETRY_DELAYS_MS: [u64; 2] = [300, 1_000];
+
+/// Do not let one unreachable host spend the operating system's much longer
+/// TCP timeout budget before the retry policy gets a chance to act. This is a
+/// connect timeout only: synthesis streams themselves may legitimately run for
+/// minutes when a long selection is being read.
+const CLOUD_CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// Failure metadata shared by the HTTP TTS providers.
+///
+/// Retrying is safe only before the current piece has emitted audio. Once any
+/// bytes have entered the playback pipeline, sending the same piece again
+/// would repeat an unknown amount of speech.
+#[derive(Debug)]
+pub(crate) struct CloudStreamError {
+    detail: String,
+    retryable: bool,
+    audio_emitted: bool,
+    reason: &'static str,
+}
+
+impl std::fmt::Display for CloudStreamError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.detail)
+    }
+}
+
+impl CloudStreamError {
+    fn new(
+        detail: String,
+        retryable: bool,
+        audio_emitted: bool,
+        reason: &'static str,
+    ) -> Self {
+        Self {
+            detail,
+            retryable,
+            audio_emitted,
+            reason,
+        }
+    }
+
+    pub(crate) fn request(err: reqwest::Error) -> Self {
+        let retryable = err.is_connect() || err.is_timeout();
+        Self::new(
+            format!("request failed: {err}"),
+            retryable,
+            false,
+            "transport",
+        )
+    }
+
+    pub(crate) fn stream(err: reqwest::Error, audio_emitted: bool) -> Self {
+        // A response-body error is commonly an HTTP/2 reset or a connection
+        // closing between headers and the first event. It is transient, but
+        // only replayable when no audio from this attempt escaped.
+        let retryable = err.is_connect() || err.is_timeout() || err.is_body();
+        Self::new(
+            format!("stream broke: {err}"),
+            retryable,
+            audio_emitted,
+            "transport",
+        )
+    }
+
+    pub(crate) fn http(status: reqwest::StatusCode, detail: String) -> Self {
+        let retryable = matches!(status.as_u16(), 408 | 425 | 429) || status.is_server_error();
+        Self::new(
+            format!("HTTP {status}: {detail}"),
+            retryable,
+            false,
+            "http",
+        )
+    }
+
+    pub(crate) fn response(detail: String, audio_emitted: bool) -> Self {
+        // Malformed data and provider-declared failures are not assumed to be
+        // transient. Retrying auth, quota, voice-id or protocol problems only
+        // delays the useful error and may bill the same request repeatedly.
+        Self::new(detail, false, audio_emitted, "response")
+    }
+
+    pub(crate) fn retry_delay_ms(&self, retries_done: usize) -> Option<u64> {
+        if !self.retryable || self.audio_emitted {
+            return None;
+        }
+        CLOUD_RETRY_DELAYS_MS.get(retries_done).copied()
+    }
+
+    pub(crate) fn reason(&self) -> &'static str {
+        self.reason
+    }
+
+    pub(crate) fn into_detail(self) -> String {
+        self.detail
+    }
+}
+
+pub(crate) fn cloud_http_client() -> Result<reqwest::Client, CloudStreamError> {
+    reqwest::Client::builder()
+        .connect_timeout(CLOUD_CONNECT_TIMEOUT)
+        .build()
+        .map_err(|err| {
+            CloudStreamError::response(format!("failed to build HTTP client: {err}"), false)
+        })
+}
+
+pub(crate) fn log_cloud_retry(
+    backend: &str,
+    retries_done: usize,
+    delay_ms: u64,
+    reason: &str,
+) {
+    log_event(
+        "speak_retry",
+        &[
+            ("backend", backend.to_string()),
+            // `retries_done == 0` follows failed attempt 1, so the request
+            // about to be sent is attempt 2 of 3.
+            ("attempt", (retries_done + 2).to_string()),
+            ("max_attempts", (CLOUD_RETRY_DELAYS_MS.len() + 1).to_string()),
+            ("delay_ms", delay_ms.to_string()),
+            ("reason", reason.to_string()),
+        ],
+    );
+}
+
 /// Why speech ended, for the structured log.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StopReason {
@@ -370,5 +502,47 @@ mod tests {
         assert_eq!(sanitize_field("Google Chrome"), "Google_Chrome");
         assert_eq!(sanitize_field("a=b"), "a_b");
         assert_eq!(sanitize_field(""), "-");
+    }
+
+    #[test]
+    fn transient_cloud_failures_get_two_bounded_retries() {
+        for status in [
+            reqwest::StatusCode::REQUEST_TIMEOUT,
+            reqwest::StatusCode::TOO_MANY_REQUESTS,
+            reqwest::StatusCode::BAD_GATEWAY,
+            reqwest::StatusCode::SERVICE_UNAVAILABLE,
+        ] {
+            let error = CloudStreamError::http(status, "temporary".to_string());
+            assert_eq!(error.retry_delay_ms(0), Some(300), "{status}");
+            assert_eq!(error.retry_delay_ms(1), Some(1_000), "{status}");
+            assert_eq!(error.retry_delay_ms(2), None, "{status}");
+        }
+    }
+
+    #[test]
+    fn permanent_or_partly_played_failures_are_not_retried() {
+        for status in [
+            reqwest::StatusCode::BAD_REQUEST,
+            reqwest::StatusCode::UNAUTHORIZED,
+            reqwest::StatusCode::FORBIDDEN,
+        ] {
+            let error = CloudStreamError::http(status, "permanent".to_string());
+            assert_eq!(error.retry_delay_ms(0), None, "{status}");
+        }
+
+        let partly_played = CloudStreamError::new(
+            "connection reset after audio".to_string(),
+            true,
+            true,
+            "transport",
+        );
+        assert_eq!(
+            partly_played.retry_delay_ms(0),
+            None,
+            "replaying a partly heard piece would duplicate speech"
+        );
+
+        let malformed = CloudStreamError::response("bad response".to_string(), false);
+        assert_eq!(malformed.retry_delay_ms(0), None);
     }
 }
