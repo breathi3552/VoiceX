@@ -12,11 +12,6 @@ const geminiApiKey = computed({
   set: (v: string) => settingsStore.updateSetting('geminiApiKey', v)
 })
 
-const geminiLiveModel = computed({
-  get: () => settingsStore.settings.geminiLiveModel,
-  set: (v: string) => settingsStore.updateSetting('geminiLiveModel', v)
-})
-
 const geminiLanguage = computed({
   get: () => settingsStore.settings.geminiLanguage,
   set: (v: 'auto' | 'zh' | 'en' | 'zh-en') => settingsStore.updateSetting('geminiLanguage', v)
@@ -34,7 +29,7 @@ const geminiLanguageOptions = computed(() => [
   <div class="surface-card asr-card">
     <div class="card-header">
       <div class="card-title">{{ t('asr.geminiLiveConfiguration') }}</div>
-      <div class="card-sub">{{ t('asr.geminiLiveConfigurationSub') }}</div>
+      <div class="card-sub">Gemini 3.5 Live Transcription · TEXT · SMART · Dictionary → customVocabulary</div>
     </div>
     <div class="field-list">
       <div class="field-row">
@@ -42,36 +37,21 @@ const geminiLanguageOptions = computed(() => [
           <div class="field-label">{{ t('asr.apiCredentials') }}</div>
           <div class="field-note">{{ t('asr.geminiApiKeyNote') }}</div>
         </div>
-        <NInput
-          v-model:value="geminiApiKey"
-          type="password"
-          show-password-on="click"
-          placeholder="AIza..."
-          class="field-control"
-        />
+        <NInput v-model:value="geminiApiKey" type="password" show-password-on="click" placeholder="AIza..." class="field-control" />
       </div>
       <div class="field-row">
         <div class="field-text">
           <div class="field-label">{{ t('asr.model') }}</div>
-          <div class="field-note">{{ t('asr.geminiLiveModelNote') }}</div>
+          <div class="field-note">Dedicated realtime transcription model</div>
         </div>
-        <NInput
-          v-model:value="geminiLiveModel"
-          placeholder="gemini-3.1-flash-live-preview"
-          class="field-control"
-        />
+        <NInput value="gemini-3.5-transcribe-live" readonly class="field-control" />
       </div>
       <div class="field-row">
         <div class="field-text">
           <div class="field-label">{{ t('asr.languageHint') }}</div>
-          <div class="field-note">{{ t('asr.geminiLiveLanguageNote') }}</div>
+          <div class="field-note">Auto enables multilingual detection; zh-en explicitly biases Chinese + English code mixing.</div>
         </div>
-        <NSelect
-          v-model:value="geminiLanguage"
-          :options="geminiLanguageOptions"
-          size="small"
-          class="field-control"
-        />
+        <NSelect v-model:value="geminiLanguage" :options="geminiLanguageOptions" size="small" class="field-control" />
       </div>
     </div>
   </div>
