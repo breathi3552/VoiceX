@@ -65,6 +65,7 @@ tonic = { version = "0.12", features = ["tls", "tls-native-roots", "transport"] 
 prost = "0.13"
 prost-types = "0.13"
 tokio-stream = "0.1"
+tower = "0.4"
 
 # JWT signing for Google Service Account auth
 ring = "0.17"

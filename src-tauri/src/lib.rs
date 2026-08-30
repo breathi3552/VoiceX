@@ -11,6 +11,7 @@ pub mod hud;
 pub mod i18n;
 pub mod injector;
 pub mod llm;
+pub mod network_proxy;
 pub mod selection;
 pub mod services;
 pub mod session;
@@ -79,6 +80,7 @@ pub fn init_app(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     // Initialize database
     let app_data_dir = app.path().app_data_dir()?;
     std::fs::create_dir_all(&app_data_dir)?;
+    network_proxy::init(app.handle()).map_err(std::io::Error::other)?;
 
     let db_path = app_data_dir.join("voicex.db");
     log::info!("Database path: {:?}", db_path);
@@ -345,6 +347,8 @@ pub fn run() {
             commands::tts::read_selection_hotkey_status,
             commands::tts::diagnose_selection,
             commands::settings::get_settings,
+            commands::network::get_http_proxy,
+            commands::network::set_http_proxy,
             commands::settings::get_recent_target_apps,
             commands::settings::get_resolved_ui_locale,
             commands::settings::save_settings,

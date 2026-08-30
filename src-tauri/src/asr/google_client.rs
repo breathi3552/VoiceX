@@ -16,6 +16,7 @@ use tokio::sync::Mutex;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::metadata::MetadataValue;
 use tonic::transport::{Channel, ClientTlsConfig};
+use tower::service_fn;
 
 use super::audio_utils::resample_to_16k;
 use super::config::AsrConfig;
@@ -35,6 +36,7 @@ static TOKEN_CACHE: std::sync::LazyLock<Mutex<Option<CachedToken>>> =
 /// Cached gRPC channel, keyed by endpoint URL.
 struct CachedChannel {
     endpoint: String,
+    proxy: String,
     channel: Channel,
 }
 
@@ -71,44 +73,66 @@ use google::cloud::speech::v2::{
 
 /// Get a cached gRPC channel or create a new one (eagerly connecting).
 async fn get_or_create_channel(endpoint_url: &str) -> Result<Channel, AsrError> {
-    // Check cache
+    let proxy = crate::network_proxy::current_http_proxy();
+
     {
         let cache = CHANNEL_CACHE.lock().await;
         if let Some(cached) = cache.as_ref() {
-            if cached.endpoint == endpoint_url {
+            if cached.endpoint == endpoint_url && cached.proxy == proxy {
                 log::debug!("Google STT: reusing cached gRPC channel");
                 return Ok(cached.channel.clone());
             }
         }
     }
 
-    // Cache miss — create and eagerly connect
     let tls_domain = endpoint_url
         .strip_prefix("https://")
-        .unwrap_or(endpoint_url);
+        .unwrap_or(endpoint_url)
+        .trim_end_matches('/')
+        .to_string();
     let tls_config = ClientTlsConfig::new()
-        .domain_name(tls_domain)
+        .domain_name(tls_domain.clone())
         .with_enabled_roots();
 
-    let channel = Channel::from_shared(endpoint_url.to_string())
+    let endpoint = Channel::from_shared(endpoint_url.to_string())
         .map_err(|e| AsrError::ConnectionFailed(format!("Invalid endpoint URL: {e}")))?
         .tls_config(tls_config)
         .map_err(|e| AsrError::ConnectionFailed(format!("TLS config error: {e}")))?
         .connect_timeout(Duration::from_secs(10))
-        .timeout(Duration::from_secs(300))
-        .connect()
-        .await
-        .map_err(|e| {
+        .timeout(Duration::from_secs(300));
+
+    let channel = if proxy.trim().is_empty() {
+        endpoint.connect().await.map_err(|e| {
             AsrError::ConnectionFailed(format!("gRPC connect to {endpoint_url} failed: {e:?}"))
-        })?;
+        })?
+    } else {
+        let target_host = tls_domain.clone();
+        endpoint
+            .connect_with_connector(service_fn(move |_| {
+                let target_host = target_host.clone();
+                async move {
+                    crate::network_proxy::connect_tcp_via_http_proxy(&target_host, 443).await
+                }
+            }))
+            .await
+            .map_err(|e| {
+                AsrError::ConnectionFailed(format!(
+                    "gRPC proxy connect to {endpoint_url} failed: {e:?}"
+                ))
+            })?
+    };
 
-    log::info!("Google STT: new gRPC channel connected to {}", endpoint_url);
+    log::info!(
+        "Google STT: new gRPC channel connected to {} (proxy={})",
+        endpoint_url,
+        if proxy.trim().is_empty() { "disabled" } else { &proxy }
+    );
 
-    // Store in cache
     {
         let mut cache = CHANNEL_CACHE.lock().await;
         *cache = Some(CachedChannel {
             endpoint: endpoint_url.to_string(),
+            proxy,
             channel: channel.clone(),
         });
     }
@@ -240,7 +264,17 @@ async fn exchange_sa_jwt(sa_json: &str) -> Result<String, AsrError> {
         "Google STT: exchanging SA JWT for access token (iss={})",
         client_email
     );
-    let http = reqwest::Client::new();
+    let proxy_url = crate::network_proxy::current_http_proxy();
+    let mut http_builder = reqwest::Client::builder();
+    if !proxy_url.trim().is_empty() {
+        let proxy = reqwest::Proxy::all(&proxy_url).map_err(|err| {
+            AsrError::ConnectionFailed(format!("Invalid HTTP proxy for Google OAuth: {err}"))
+        })?;
+        http_builder = http_builder.proxy(proxy);
+    }
+    let http = http_builder.build().map_err(|err| {
+        AsrError::ConnectionFailed(format!("Failed to build Google OAuth HTTP client: {err}"))
+    })?;
     let resp = http
         .post(token_uri)
         .form(&[

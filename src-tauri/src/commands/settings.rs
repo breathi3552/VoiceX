@@ -361,7 +361,7 @@ impl Default for AppSettings {
             qwen_asr_heartbeat: false,
             gemini_api_key: String::new(),
             gemini_model: "gemini-3.1-flash-lite-preview".to_string(),
-            gemini_live_model: "gemini-3.1-flash-live-preview".to_string(),
+            gemini_live_model: "gemini-3.5-transcribe-live".to_string(),
             gemini_language: "auto".to_string(),
             cohere_api_key: String::new(),
             cohere_model: "cohere-transcribe-03-2026".to_string(),

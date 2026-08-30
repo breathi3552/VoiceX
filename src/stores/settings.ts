@@ -317,7 +317,7 @@ const defaultSettings: AppSettings = {
     qwenAsrHeartbeat: false,
     geminiApiKey: '',
     geminiModel: 'gemini-3.1-flash-lite-preview',
-    geminiLiveModel: 'gemini-3.1-flash-live-preview',
+    geminiLiveModel: 'gemini-3.5-transcribe-live',
     geminiLanguage: 'auto',
     cohereApiKey: '',
     cohereModel: 'cohere-transcribe-03-2026',

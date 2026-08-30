@@ -21,6 +21,7 @@ import AsrStepAudioSettings from '../components/asr/AsrStepAudioSettings.vue'
 import AsrMimoSettings from '../components/asr/AsrMimoSettings.vue'
 import AsrQwenLocalSettings from '../components/asr/AsrQwenLocalSettings.vue'
 import AsrColiSettings from '../components/asr/AsrColiSettings.vue'
+import NetworkProxySettings from '../components/asr/NetworkProxySettings.vue'
 
 const settingsStore = useSettingsStore()
 const { t } = useI18n()
@@ -351,6 +352,8 @@ async function clearSonioxDebugOverrides() {
         </div>
       </div>
     </div>
+
+    <NetworkProxySettings />
 
     <!-- Provider-specific configuration -->
     <AsrVolcengineSettings v-if="isVolcengine" />
