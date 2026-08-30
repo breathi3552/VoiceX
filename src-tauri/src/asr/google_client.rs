@@ -9,6 +9,7 @@ use std::time::Duration;
 
 use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
 use base64::Engine;
+use hyper_util::rt::TokioIo;
 use ring::rand::SystemRandom;
 use ring::signature::{RsaKeyPair, RSA_PKCS1_SHA256};
 use tokio::sync::mpsc::Receiver;
@@ -111,7 +112,9 @@ async fn get_or_create_channel(endpoint_url: &str) -> Result<Channel, AsrError> 
             .connect_with_connector(service_fn(move |_| {
                 let target_host = target_host.clone();
                 async move {
-                    crate::network_proxy::connect_tcp_via_http_proxy(&target_host, 443).await
+                    crate::network_proxy::connect_tcp_via_http_proxy(&target_host, 443)
+                        .await
+                        .map(TokioIo::new)
                 }
             }))
             .await
