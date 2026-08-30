@@ -40,6 +40,16 @@ def patch_google():
             raise RuntimeError("tonic import anchor missing")
         text = text.replace(anchor, anchor + "use tower::service_fn;\n", 1)
 
+    if "use hyper_util::rt::TokioIo;" not in text:
+        anchor = "use futures_util::{SinkExt, StreamExt};\n"
+        if anchor in text:
+            text = text.replace(anchor, anchor + "use hyper_util::rt::TokioIo;\n", 1)
+        else:
+            anchor = "use base64::Engine;\n"
+            if anchor not in text:
+                raise RuntimeError("hyper-util import anchor missing")
+            text = text.replace(anchor, anchor + "use hyper_util::rt::TokioIo;\n", 1)
+
     text = text.replace(
         "struct CachedChannel {\n    endpoint: String,\n    channel: Channel,\n}",
         "struct CachedChannel {\n    endpoint: String,\n    proxy: String,\n    channel: Channel,\n}",
@@ -85,7 +95,9 @@ def patch_google():
             .connect_with_connector(service_fn(move |_| {
                 let target_host = target_host.clone();
                 async move {
-                    crate::network_proxy::connect_tcp_via_http_proxy(&target_host, 443).await
+                    crate::network_proxy::connect_tcp_via_http_proxy(&target_host, 443)
+                        .await
+                        .map(TokioIo::new)
                 }
             }))
             .await
@@ -166,7 +178,7 @@ def main():
     replace_once(
         "src-tauri/Cargo.toml",
         'tokio-stream = "0.1"\n',
-        'tokio-stream = "0.1"\ntower = "0.4"\n',
+        'tokio-stream = "0.1"\ntower = "0.4"\nhyper-util = { version = "0.1", features = ["tokio"] }\n',
     )
 
     patch_google()
