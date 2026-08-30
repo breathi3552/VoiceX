@@ -1,0 +1,74 @@
+name: publish-gemini35-release
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/publish-release.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: breathi3552/VoiceX
+      SOURCE_RUN_ID: "33322934698"
+      SOURCE_ARTIFACT: VoiceX-windows-x64
+      TARGET_SHA: "26d2aa1a2188bd3b13c49df6c6c2969e3bee7732"
+      TAG: v0.14.0-gemini35
+    steps:
+      - name: Download successful Windows artifact
+        run: |
+          gh run download "$SOURCE_RUN_ID" \
+            --repo "$REPO" \
+            --name "$SOURCE_ARTIFACT" \
+            --dir artifact
+
+      - name: Collect installers
+        run: |
+          mkdir -p release-assets
+          find artifact -type f \( -iname '*.exe' -o -iname '*.msi' \) -print -exec cp '{}' release-assets/ \;
+          test -n "$(find release-assets -maxdepth 1 -type f -print -quit)"
+          echo "Release assets:"
+          ls -lh release-assets
+
+      - name: Write release notes
+        run: |
+          cat > RELEASE_NOTES.md <<'EOF'
+          ## VoiceX Gemini 3.5 / Google Cloud Proxy build
+
+          Windows x64 build based on VoiceX 0.14.0.
+
+          ### Changes
+          - Gemini Live switched to `gemini-3.5-transcribe-live`.
+          - Uses TEXT + SMART transcription protocol.
+          - Supports Chinese, English, and Chinese/English mixed speech.
+          - Dictionary/hotwords are sent as `customVocabulary`.
+          - Added in-app explicit HTTP proxy setting; default `http://127.0.0.1:7890`.
+          - Gemini Live WebSocket uses the explicit HTTP CONNECT proxy.
+          - Google Cloud Speech-to-Text V2 / Chirp 3 OAuth and gRPC use the same proxy.
+          - Local ASR remains available.
+          - Windows x64 MSI and NSIS EXE installers are included.
+
+          Built by GitHub Actions from commit `26d2aa1a2188bd3b13c49df6c6c2969e3bee7732`.
+          EOF
+
+      - name: Create or update GitHub Release
+        run: |
+          if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
+            gh release upload "$TAG" release-assets/* --repo "$REPO" --clobber
+          else
+            gh release create "$TAG" release-assets/* \
+              --repo "$REPO" \
+              --target "$TARGET_SHA" \
+              --title "VoiceX v0.14.0 - Gemini 3.5 / Google Proxy" \
+              --notes-file RELEASE_NOTES.md
+          fi
+
+      - name: Show release
+        run: gh release view "$TAG" --repo "$REPO" --json url,tagName,name,isDraft,isPrerelease
