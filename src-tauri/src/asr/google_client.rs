@@ -74,12 +74,15 @@ use google::cloud::speech::v2::{
 
 /// Get a cached gRPC channel or create a new one (eagerly connecting).
 async fn get_or_create_channel(endpoint_url: &str) -> Result<Channel, AsrError> {
-    let proxy = crate::network_proxy::current_http_proxy();
+    let resolved_proxy = crate::network_proxy::resolve_proxy_for_url(endpoint_url).map_err(|err| {
+        AsrError::ConnectionFailed(format!("Failed to resolve global proxy for Google STT: {err}"))
+    })?;
+    let proxy_key = resolved_proxy.clone().unwrap_or_default();
 
     {
         let cache = CHANNEL_CACHE.lock().await;
         if let Some(cached) = cache.as_ref() {
-            if cached.endpoint == endpoint_url && cached.proxy == proxy {
+            if cached.endpoint == endpoint_url && cached.proxy == proxy_key {
                 log::debug!("Google STT: reusing cached gRPC channel");
                 return Ok(cached.channel.clone());
             }
@@ -102,7 +105,7 @@ async fn get_or_create_channel(endpoint_url: &str) -> Result<Channel, AsrError> 
         .connect_timeout(Duration::from_secs(10))
         .timeout(Duration::from_secs(300));
 
-    let channel = if proxy.trim().is_empty() {
+    let channel = if resolved_proxy.is_none() {
         endpoint.connect().await.map_err(|e| {
             AsrError::ConnectionFailed(format!("gRPC connect to {endpoint_url} failed: {e:?}"))
         })?
@@ -128,14 +131,14 @@ async fn get_or_create_channel(endpoint_url: &str) -> Result<Channel, AsrError> 
     log::info!(
         "Google STT: new gRPC channel connected to {} (proxy={})",
         endpoint_url,
-        if proxy.trim().is_empty() { "disabled" } else { &proxy }
+        resolved_proxy.as_deref().unwrap_or("direct")
     );
 
     {
         let mut cache = CHANNEL_CACHE.lock().await;
         *cache = Some(CachedChannel {
             endpoint: endpoint_url.to_string(),
-            proxy,
+            proxy: proxy_key,
             channel: channel.clone(),
         });
     }
@@ -267,16 +270,8 @@ async fn exchange_sa_jwt(sa_json: &str) -> Result<String, AsrError> {
         "Google STT: exchanging SA JWT for access token (iss={})",
         client_email
     );
-    let proxy_url = crate::network_proxy::current_http_proxy();
-    let mut http_builder = reqwest::Client::builder();
-    if !proxy_url.trim().is_empty() {
-        let proxy = reqwest::Proxy::all(&proxy_url).map_err(|err| {
-            AsrError::ConnectionFailed(format!("Invalid HTTP proxy for Google OAuth: {err}"))
-        })?;
-        http_builder = http_builder.proxy(proxy);
-    }
-    let http = http_builder.build().map_err(|err| {
-        AsrError::ConnectionFailed(format!("Failed to build Google OAuth HTTP client: {err}"))
+    let http = crate::network_proxy::build_reqwest_client(token_uri).map_err(|err| {
+        AsrError::ConnectionFailed(format!("Failed to configure global proxy for Google OAuth: {err}"))
     })?;
     let resp = http
         .post(token_uri)

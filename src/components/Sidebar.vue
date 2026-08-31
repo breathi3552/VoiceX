@@ -33,6 +33,7 @@ const navGroups: NavGroup[] = [
       { path: '/asr-settings', name: 'asr-settings', icon: 'mic', labelKey: 'nav.asrSettings' },
       { path: '/llm-settings', name: 'llm-settings', icon: 'brain', labelKey: 'nav.llmSettings' },
       { path: '/input-settings', name: 'input-settings', icon: 'keyboard', labelKey: 'nav.inputSettings' },
+      { path: '/network-settings', name: 'network-settings', icon: 'network', labelKey: 'nav.networkSettings' },
       { path: '/reading-settings', name: 'reading-settings', icon: 'speaker', labelKey: 'nav.readingSettings' },
       { path: '/sync', name: 'sync', icon: 'sync', labelKey: 'nav.sync' },
       { path: '/post-processing', name: 'post-processing', icon: 'wand', labelKey: 'nav.postProcessing' },
@@ -103,6 +104,10 @@ function navigateTo(path: string) {
           <!-- Keyboard icon -->
           <svg v-else-if="item.icon === 'keyboard'" viewBox="0 0 24 24" fill="currentColor">
             <path d="M20 5H4c-1.1 0-1.99.9-1.99 2L2 17c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm-9 3h2v2h-2V8zm0 3h2v2h-2v-2zM8 8h2v2H8V8zm0 3h2v2H8v-2zm-1 2H5v-2h2v2zm0-3H5V8h2v2zm9 7H8v-2h8v2zm0-4h-2v-2h2v2zm0-3h-2V8h2v2zm3 3h-2v-2h2v2zm0-3h-2V8h2v2z"/>
+          </svg>
+          <!-- Network icon -->
+          <svg v-else-if="item.icon === 'network'" viewBox="0 0 24 24" fill="currentColor">
+            <path d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20zm6.92 6h-3.08a15.7 15.7 0 0 0-1.38-3.56A8.05 8.05 0 0 1 18.92 8zM12 4c.83 1.2 1.46 2.54 1.82 4h-3.64A13.6 13.6 0 0 1 12 4zM4.26 14a7.8 7.8 0 0 1 0-4h3.4a16.5 16.5 0 0 0 0 4h-3.4zm.82 2h3.08c.3 1.26.76 2.46 1.38 3.56A8.05 8.05 0 0 1 5.08 16zm3.08-8H5.08a8.05 8.05 0 0 1 4.46-3.56A15.7 15.7 0 0 0 8.16 8zM12 20a13.6 13.6 0 0 1-1.82-4h3.64A13.6 13.6 0 0 1 12 20zm2.2-6H9.8a14.2 14.2 0 0 1 0-4h4.4a14.2 14.2 0 0 1 0 4zm.26 5.56c.62-1.1 1.08-2.3 1.38-3.56h3.08a8.05 8.05 0 0 1-4.46 3.56zM16.34 14a16.5 16.5 0 0 0 0-4h3.4a7.8 7.8 0 0 1 0 4h-3.4z"/>
           </svg>
           <!-- Speaker icon -->
           <svg v-else-if="item.icon === 'speaker'" viewBox="0 0 24 24" fill="currentColor">

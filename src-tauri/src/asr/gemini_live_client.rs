@@ -423,8 +423,7 @@ fn parse_json_message(msg: Message, stage: &str) -> Result<Value, AsrError> {
 }
 
 fn display_proxy() -> String {
-    let proxy = crate::network_proxy::current_http_proxy();
-    if proxy.trim().is_empty() { "disabled".to_string() } else { proxy }
+    crate::network_proxy::describe_current()
 }
 
 #[derive(Default)]

@@ -348,6 +348,8 @@ pub fn run() {
             commands::tts::read_selection_hotkey_status,
             commands::tts::diagnose_selection,
             commands::settings::get_settings,
+            commands::network::get_network_proxy_config,
+            commands::network::set_network_proxy_config,
             commands::network::get_http_proxy,
             commands::network::set_http_proxy,
             commands::settings::get_recent_target_apps,

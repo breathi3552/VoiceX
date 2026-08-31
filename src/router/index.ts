@@ -43,6 +43,11 @@ const router = createRouter({
       component: () => import('../views/InputSettings.vue')
     },
     {
+      path: '/network-settings',
+      name: 'network-settings',
+      component: () => import('../views/NetworkSettings.vue')
+    },
+    {
       path: '/reading-settings',
       name: 'reading-settings',
       component: () => import('../views/ReadingSettings.vue')
