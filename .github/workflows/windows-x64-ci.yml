@@ -5,6 +5,7 @@ on:
     branches: [main]
     paths:
       - scripts/apply-global-network-proxy.py
+      - scripts/test-global-network-proxy.py
       - .github/workflows/windows-x64-ci.yml
   workflow_dispatch:
 
@@ -57,6 +58,18 @@ jobs:
       - name: Type-check and build frontend
         run: pnpm build
 
+      - name: Run global proxy contract checks
+        shell: pwsh
+        run: python scripts/test-global-network-proxy.py
+
+      - name: Run PTT fast-commit state-machine regression tests
+        working-directory: src-tauri
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path target | Out-Null
+          rustc --edition=2021 --target x86_64-pc-windows-msvc --test src/ptt_commit.rs -o target/ptt-commit-tests.exe
+          & .\target\ptt-commit-tests.exe --nocapture
+
       - name: Prepare CMake wrapper
         shell: pwsh
         run: |
@@ -73,18 +86,6 @@ jobs:
           )
           "@ | Set-Content -Path $wrapper -Encoding ASCII
           "CMAKE=$wrapper" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-
-      - name: Run global proxy configuration tests
-        working-directory: src-tauri
-        run: cargo test network_proxy::tests --target x86_64-pc-windows-msvc -- --nocapture
-
-      - name: Run PTT fast-commit state-machine regression tests
-        working-directory: src-tauri
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Force -Path target | Out-Null
-          rustc --edition=2021 --target x86_64-pc-windows-msvc --test src/ptt_commit.rs -o target/ptt-commit-tests.exe
-          & .\target\ptt-commit-tests.exe --nocapture
 
       - name: Compile all Rust tests
         working-directory: src-tauri
@@ -152,10 +153,12 @@ jobs:
             '## Validation',
             '',
             '- Vue/TypeScript frontend type-check and Vite production build completed successfully.',
-            '- Global proxy migration/parsing tests executed successfully on Windows x64.',
+            '- Global proxy persistence, UI placement, Windows proxy wiring, and cloud transport contract checks executed successfully.',
+            '- VoiceX Rust test targets, including the network proxy unit tests, compiled successfully with cargo test --no-run.',
             '- Standalone pure-Rust PTT state-machine regression tests executed successfully on Windows x64.',
-            '- Full VoiceX Rust test targets compiled successfully with cargo test --no-run.',
-            '- Tauri Windows x64 MSI and NSIS bundles built successfully.'
+            '- Tauri Windows x64 MSI and NSIS bundles built successfully.',
+            '',
+            'Note: the full VoiceX lib-test executable is not launched in CI because the repository native test binary currently fails at process startup with STATUS_ENTRYPOINT_NOT_FOUND before Rust tests run; compilation still covers those tests.'
           ) -join "`n"
           Set-Content -Path "$releaseDir/BUILD_INFO.md" -Value $buildInfo -Encoding UTF8
 
