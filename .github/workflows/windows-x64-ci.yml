@@ -4,9 +4,7 @@ on:
   push:
     branches: [main]
     paths:
-      - scripts/apply-gemini35-proxy-upgrade.py
-      - scripts/apply-ptt-fast-commit.py
-      - scripts/apply-ptt-fast-commit-test-harness.py
+      - scripts/apply-global-network-proxy.py
       - .github/workflows/windows-x64-ci.yml
   workflow_dispatch:
 
@@ -22,17 +20,9 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Apply Gemini 3.5 and proxy source migration
+      - name: Apply global network proxy migration
         shell: pwsh
-        run: python scripts/apply-gemini35-proxy-upgrade.py
-
-      - name: Apply PTT release-to-commit migration
-        shell: pwsh
-        run: python scripts/apply-ptt-fast-commit.py
-
-      - name: Apply standalone PTT state-machine test harness
-        shell: pwsh
-        run: python scripts/apply-ptt-fast-commit-test-harness.py
+        run: python scripts/apply-global-network-proxy.py
 
       - name: Commit generated source changes
         shell: bash
@@ -40,8 +30,8 @@ jobs:
           if ! git diff --quiet; then
             git config user.name "github-actions[bot]"
             git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git add src src-tauri package.json
-            git commit -m "test: share PTT commit policy with standalone state tests"
+            git add src src-tauri
+            git commit -m "feat: add global network proxy modes"
             git push origin HEAD:main
           fi
 
@@ -64,6 +54,9 @@ jobs:
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Type-check and build frontend
+        run: pnpm build
+
       - name: Prepare CMake wrapper
         shell: pwsh
         run: |
@@ -81,7 +74,11 @@ jobs:
           "@ | Set-Content -Path $wrapper -Encoding ASCII
           "CMAKE=$wrapper" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
-      - name: Run PTT fast-commit state-machine tests
+      - name: Run global proxy configuration tests
+        working-directory: src-tauri
+        run: cargo test network_proxy::tests --target x86_64-pc-windows-msvc -- --nocapture
+
+      - name: Run PTT fast-commit state-machine regression tests
         working-directory: src-tauri
         shell: pwsh
         run: |
@@ -100,7 +97,7 @@ jobs:
             git config user.name "github-actions[bot]"
             git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
             git add src-tauri/Cargo.lock
-            git commit -m "build: update Cargo lockfile for v0.14.1"
+            git commit -m "build: update Cargo lockfile for global network proxy"
             git push origin HEAD:main
           fi
 
@@ -110,7 +107,7 @@ jobs:
       - name: Upload Windows x64 installers
         uses: actions/upload-artifact@v4
         with:
-          name: VoiceX-v0.14.1-ptt-fast-commit-windows-x64
+          name: VoiceX-v0.14.1-global-network-proxy-windows-x64
           path: |
             src-tauri/target/x86_64-pc-windows-msvc/release/bundle/msi/*.msi
             src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*.exe
@@ -121,7 +118,7 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $releaseDir = 'release-builds/v0.14.1-ptt-fast-commit'
+          $releaseDir = 'release-builds/v0.14.1-global-network-proxy'
           New-Item -ItemType Directory -Force -Path $releaseDir | Out-Null
           Remove-Item "$releaseDir/*.exe", "$releaseDir/*.msi" -Force -ErrorAction SilentlyContinue
 
@@ -134,7 +131,7 @@ jobs:
           $sourceSha = (git rev-parse HEAD).Trim()
           $runUrl = "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
           $buildInfo = @(
-            '# VoiceX v0.14.1 PTT Fast Commit',
+            '# VoiceX v0.14.1 Global Network Proxy',
             '',
             '- Version: 0.14.1',
             '- Platform: Windows x64 (x86_64-pc-windows-msvc)',
@@ -143,16 +140,20 @@ jobs:
             '',
             '## Main changes',
             '',
-            '- Push-To-Talk key release is an explicit commit signal.',
-            '- Existing provider final text is preferred; otherwise the latest HUD/interim transcript is committed.',
-            '- Empty PTT snapshots are not injected.',
-            '- Late ASR final/partial/failure/finished messages are ignored after a PTT release commit, preventing duplicate input.',
-            '- Hands-Free keeps its existing ASR completion behavior.',
-            '- Gemini 3.5 transcription, Google Cloud STT, proxy transport, local ASR, and the existing text-injection pipeline remain enabled.',
+            '- Proxy settings moved out of ASR into the global Network settings page.',
+            '- Explicit No proxy, System proxy, and Custom proxy modes.',
+            '- Legacy explicit proxy URLs migrate to Custom mode without losing the saved URL.',
+            '- System mode reads the current Windows user proxy configuration for new connections.',
+            '- Direct mode explicitly bypasses system/environment proxy discovery.',
+            '- Gemini Live WebSocket and Google Cloud STT / Chirp 3 OAuth and gRPC share the same global proxy configuration.',
+            '- Local ASR remains independent of the global network proxy.',
+            '- Existing PTT release-to-commit source is unchanged and its standalone regression tests still pass.',
             '',
             '## Validation',
             '',
-            '- Standalone pure-Rust PTT state-machine tests executed successfully on Windows x64.',
+            '- Vue/TypeScript frontend type-check and Vite production build completed successfully.',
+            '- Global proxy migration/parsing tests executed successfully on Windows x64.',
+            '- Standalone pure-Rust PTT state-machine regression tests executed successfully on Windows x64.',
             '- Full VoiceX Rust test targets compiled successfully with cargo test --no-run.',
             '- Tauri Windows x64 MSI and NSIS bundles built successfully.'
           ) -join "`n"
@@ -161,5 +162,5 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add $releaseDir
-          git commit -m "build: archive VoiceX v0.14.1 PTT Windows x64 installers [skip ci]"
+          git commit -m "build: archive VoiceX v0.14.1 global proxy Windows x64 installers [skip ci]"
           git push origin HEAD:main
